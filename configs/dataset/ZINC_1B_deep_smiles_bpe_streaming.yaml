@@ -1,0 +1,7 @@
+dataset_name: "MolGen/ZINC_1B-raw"
+tokenizer_path: "./data/tokenizers/tokenizer_bpe_None_Deep SMILES_500_0_0.1.json"
+mol_type: "Deep SMILES"
+max_seq_length: 64
+num_proc: 8
+streaming: True
+validation_set_names: ["MolGen/zinc_scaffold", "MolGen/zinc_random"]

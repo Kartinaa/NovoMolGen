@@ -1,0 +1,7 @@
+# configs/finetune/.gitignore
+*
+!.gitignore
+!dpo_trainer_pmo.yaml
+!reinvent_trainer_pmo.yaml
+!sft_trainer_pmo.yaml
+!augment_hc_*

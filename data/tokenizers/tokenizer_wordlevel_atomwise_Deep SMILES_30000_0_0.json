@@ -1,0 +1,218 @@
+{
+  "version": "1.0",
+  "truncation": null,
+  "padding": null,
+  "added_tokens": [
+    {
+      "id": 0,
+      "content": "<pad>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 1,
+      "content": "<unk>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 2,
+      "content": "<eos>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 3,
+      "content": "<bos>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    }
+  ],
+  "normalizer": null,
+  "pre_tokenizer": {
+    "type": "Split",
+    "pattern": {
+      "Regex": "(\\[[^\\]]+]|Br?|Cl?|N|O|S|P|F|I|b|c|n|o|s|p|\\(|\\)|\\.|=|#|-|\\+|\\\\\\\\|\\/|:|~|@|\\?|>>?|\\*|\\$|\\%[0-9]{2}|[0-9])"
+    },
+    "behavior": "Isolated",
+    "invert": false
+  },
+  "post_processor": {
+    "type": "TemplateProcessing",
+    "single": [
+      {
+        "SpecialToken": {
+          "id": "<bos>",
+          "type_id": 0
+        }
+      },
+      {
+        "Sequence": {
+          "id": "A",
+          "type_id": 0
+        }
+      },
+      {
+        "SpecialToken": {
+          "id": "<eos>",
+          "type_id": 0
+        }
+      }
+    ],
+    "pair": [
+      {
+        "Sequence": {
+          "id": "A",
+          "type_id": 0
+        }
+      },
+      {
+        "Sequence": {
+          "id": "B",
+          "type_id": 1
+        }
+      }
+    ],
+    "special_tokens": {
+      "<bos>": {
+        "id": "<bos>",
+        "ids": [
+          3
+        ],
+        "tokens": [
+          "<bos>"
+        ]
+      },
+      "<eos>": {
+        "id": "<eos>",
+        "ids": [
+          2
+        ],
+        "tokens": [
+          "<eos>"
+        ]
+      }
+    }
+  },
+  "decoder": {
+    "type": "BPEDecoder",
+    "suffix": "</w>"
+  },
+  "model": {
+    "type": "WordLevel",
+    "vocab": {
+      "<unk>": 0,
+      "<pad>": 1,
+      "<bos>": 2,
+      "<eos>": 3,
+      ")": 4,
+      "C": 5,
+      "c": 6,
+      "O": 7,
+      "=": 8,
+      "N": 9,
+      "n": 10,
+      "6": 11,
+      "5": 12,
+      "[C@H]": 13,
+      "[C@@H]": 14,
+      "F": 15,
+      "4": 16,
+      "3": 17,
+      "S": 18,
+      "s": 19,
+      "Cl": 20,
+      "[nH]": 21,
+      "o": 22,
+      "9": 23,
+      "[C@]": 24,
+      "[C@@]": 25,
+      "#": 26,
+      "7": 27,
+      "Br": 28,
+      "8": 29,
+      "-": 30,
+      "/": 31,
+      "%10": 32,
+      "[N+]": 33,
+      "[O-]": 34,
+      "I": 35,
+      "[N-]": 36,
+      "P": 37,
+      "[S@]": 38,
+      "[S@@]": 39,
+      "[n+]": 40,
+      "%11": 41,
+      "[Si]": 42,
+      "%13": 43,
+      "[S+]": 44,
+      "B": 45,
+      "%14": 46,
+      "%12": 47,
+      "[P@]": 48,
+      "[P@@]": 49,
+      "[N@]": 50,
+      "%15": 51,
+      "[N@@]": 52,
+      "%18": 53,
+      "%17": 54,
+      "[B-]": 55,
+      "%16": 56,
+      "%19": 57,
+      "%20": 58,
+      "[NH+]": 59,
+      "[N@@H+]": 60,
+      "[NH2+]": 61,
+      "%21": 62,
+      "[N@H+]": 63,
+      "%22": 64,
+      "[O]": 65,
+      "[NH3+]": 66,
+      "[PH]": 67,
+      "%23": 68,
+      "%24": 69,
+      "[Si@]": 70,
+      "[Si@@]": 71,
+      "[n-]": 72,
+      "[N@+]": 73,
+      "[nH+]": 74,
+      "%26": 75,
+      "[N@@+]": 76,
+      "[Sn]": 77,
+      "[s+]": 78,
+      "%25": 79,
+      "[Se]": 80,
+      ".": 81,
+      "[Cl-]": 82,
+      "%27": 83,
+      "%28": 84,
+      "[N]": 85,
+      "[C-]": 86,
+      "[C]": 87,
+      "[S@@+]": 88,
+      "%29": 89,
+      "[O+]": 90,
+      "[SH]": 91,
+      "[Si@H]": 92,
+      "[NH]": 93,
+      "[P+]": 94,
+      "[P@@H]": 95,
+      "[Si@@H]": 96,
+      "[c-]": 97,
+      "[o+]": 98
+    },
+    "unk_token": "<unk>"
+  }
+}
