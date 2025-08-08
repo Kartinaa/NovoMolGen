@@ -9,7 +9,7 @@
 
 > Designing \denovo molecules with desired property profiles requires efficient exploration of the vast chemical space ranging from $10^{23}$ to $10^{60}$ possible synthesizable candidates. While various deep generative models have been developed to design small molecules using diverse input representations, Molecular Large Language Models (Mol-LLMs) based on string representations have emerged as a scalable approach capable of exploring billions of molecules. However, there remains limited understanding regarding how standard language modeling practices such as textual representations, tokenization strategies, model size, and dataset scale impact molecular generation performance. In this work, we systematically investigate these critical aspects by introducing NovoMolGen, a family of transformer-based foundation models pretrained on 1.5 billion molecules for \denovo molecule generation. Through extensive empirical analyses, we identify a weak correlation between performance metrics measured during pretraining and actual downstream performance, revealing important distinctions between molecular and general NLP training dynamics. NovoMolGen establishes new state-of-the-art results, substantially outperforming prior Mol-LLMs and specialized generative models in both unconstrained and goal-directed molecular generation tasks, thus providing a robust foundation for advancing efficient and effective molecular modeling strategies.
 
-🤗 **Checkpoints, tokenizers, and datasets:** <https://huggingface.co/collections/chandar-lab/NovoMolGen>
+🤗 **Checkpoints, tokenizers, and datasets:** [https://huggingface.co/collections/chandar-lab/novomolgen](https://huggingface.co/collections/chandar-lab/novomolgen-681bce8b0e73b5dc7a3b0ff1)
 
 ---
 
