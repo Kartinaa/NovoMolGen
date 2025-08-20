@@ -86,11 +86,13 @@ python src/main.py finetune \
 ## Citation
 
 ```bibtex
-@article{chitsaz2024novomolgen,
-  title={NovoMolGen: Rethinking Molecular Language Model Pretraining},
-  author={Chitsaz, Kamran and Balaji, Roshan and Fournier, Quentin and 
-          Bhatt, Nirav Pravinbhai and Chandar, Sarath},
-  journal={arXiv preprint},
-  year={2025},
+@misc{chitsaz2025novomolgenrethinkingmolecularlanguage,
+      title={NovoMolGen: Rethinking Molecular Language Model Pretraining}, 
+      author={Kamran Chitsaz and Roshan Balaji and Quentin Fournier and Nirav Pravinbhai Bhatt and Sarath Chandar},
+      year={2025},
+      eprint={2508.13408},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2508.13408}, 
 }
 ```
