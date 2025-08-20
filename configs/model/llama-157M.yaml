@@ -1,0 +1,10 @@
+model_type: "llama"
+hidden_size: 640
+num_hidden_layers: 24
+num_attention_heads: 10
+intermediate_size: 2560
+use_flash_attn: true
+fused_bias_fc: false
+fused_mlp: false
+fused_dropout_add_ln: false
+residual_in_fp32: true

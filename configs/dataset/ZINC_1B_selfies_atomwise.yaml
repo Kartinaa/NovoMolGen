@@ -1,0 +1,7 @@
+dataset_name: "MolGen/ZINC_1B-raw"
+tokenizer_path: "./data/tokenizers/tokenizer_wordlevel_atomwise_SELFIES_30000_0_0.json"
+mol_type: "SELFIES"
+max_seq_length: 64
+num_proc: 24
+streaming: False
+validation_set_names: ["MolGen/zinc_scaffold", "MolGen/zinc_random"]

@@ -1,0 +1,24 @@
+benchmark,f_RAG,Genetic GFN,Mol_GA,REINVENT
+Albuterol_Similarity,0.505,0.375,0.596,0.418
+Amlodipine_MPO,0.394,0.28,0.371,0.334
+Celecoxib_Rediscovery,0.36,0.283,0.318,0.306
+Deco Hop,0.482,0.536,0.422,0.445
+DRD2,0.491,0.521,0.548,0.496
+Fexofenadine_MPO,0.526,0.424,0.508,0.403
+GSK3B,0.329,0.159,0.085,0.402
+Isomers_C7H8N2O2,0.824,0.786,0.82,0.765
+Isomers_C9H10N2O2PF2Cl,0.797,0.621,0.789,0.699
+JNK3,0.318,0.354,0.045,0.205
+Median 1,0.614,0.43,0.543,0.436
+Median 2,0.424,0.47,0.424,0.382
+Mestranol_Similarity,0.572,0.214,0.443,0.322
+Osimertinib_MPO,0.48,0.45,0.505,0.444
+Perindopril_MPO,0.375,0.394,0.454,0.346
+QED,0.816,0.642,0.601,0.699
+Ranolazine_MPO,0.57,0.383,0.42,0.318
+Scaffold Hop,0.479,0.465,0.451,0.456
+Sitagliptin_MPO,0.647,0.165,0.632,0.673
+Thiothixene_Rediscovery,0.428,0.388,0.438,0.387
+Troglitazone_Rediscovery,0.445,0.391,0.407,0.41
+Valsartan_SMARTS,0.6,0.881,0.902,0.882
+Zaleplon_MPO,0.751,0.581,0.563,0.53

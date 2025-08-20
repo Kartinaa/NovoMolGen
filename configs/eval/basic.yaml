@@ -1,0 +1,9 @@
+task_names: ["unique@1k", "unique@10k", "IntDiv", "IntDiv2", "filters", "logP_mean", "QED_mean"]
+batch_size: 1000
+n_jobs: 8
+n_samples: 30000
+prompt: ""
+temperature: 1.0
+top_k: 50
+top_p: 0.95
+max_length: 64
