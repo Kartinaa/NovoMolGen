@@ -2,6 +2,7 @@
 import torch
 import rootutils
 import numpy as np
+import types
 
 rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
@@ -129,3 +130,55 @@ def generate_valid_smiles(
     assert len(result['SMILES']) == len(result['sequences'])
     
     return result
+
+
+@torch.inference_mode()
+def _sample_molecules_hfmodel(
+    self,
+    tokenizer,
+    batch_size: int = 16,
+    prompt: str = "",
+    max_length: int = 64,
+    temperature: float = 1.0,
+    top_p: float = 1.0,
+    remove_spaces: bool = True,
+    device: torch.device = torch.device("cuda"),
+    **gen_kwargs,
+):
+    device = next(self.parameters()).device
+    bos, eos, pad = tokenizer.bos_token_id, tokenizer.eos_token_id, tokenizer.pad_token_id
+    assert pad is not None, "pad_token_id is not set"
+
+    if prompt == "":
+        base = torch.tensor([[bos if bos is not None else (eos if eos is not None else pad)]], device=device)
+    else:
+        base = tokenizer(prompt, return_tensors="pt", add_special_tokens=True).input_ids.to(device)
+
+    input_ids = base.expand(batch_size, -1).contiguous()
+
+    gen_args = dict(
+        do_sample=True,
+        temperature=temperature,
+        top_p=top_p,
+        max_new_tokens=max_length,
+        eos_token_id=eos,
+        pad_token_id=pad,
+        return_dict_in_generate=True,
+    )
+    gen_args.update(gen_kwargs)
+
+    out = self.generate(input_ids=input_ids, **gen_args)
+    seqs = out.sequences
+
+    texts = tokenizer.batch_decode(seqs, skip_special_tokens=True)
+
+    result = {
+            f'{self.mol_type}': [t.replace(" ", "") if remove_spaces else t for t in texts],
+            "sequences": seqs.detach(),
+        }
+    return result
+
+def prepare_hf_model(model, mol_type: str = "SMILES"):
+    model.sample = types.MethodType(_sample_molecules_hfmodel, model)
+    model.mol_type = mol_type
+    return model

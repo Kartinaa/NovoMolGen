@@ -57,10 +57,11 @@ python src/main.py finetune \
 
 ## Code Structure  
 
-- [`configs`](./configs): Contains YAML files for configuring **datasets, models, trainers, fine-tuning**.   
+- [`configs`](./configs): Contains YAML files for configuring **datasets, models, trainers, fine-tuning**.
 - [`scripts`](./scripts): Bash helpers (environment setup, etc.).  
-- [`notebooks`](./notebooks)  
-  - **`goal_directed_optimization.ipynb`** – Jupyter demo: load a 🤗-hosted NovoMolGen checkpoint, run `REINVENTTrainer` on one optimisation task, and plot rewards + generated molecules.
+- [`notebooks`](./notebooks)
+  - **[`checkpoint_quickstart.ipynb`](./notebooks/checkpoint_quickstart.ipynb)** – Quickstart: Loads the **NovoMolGen-32M** checkpoint + tokenizer from 🤗 Hub, samples **3k** SMILES, and evaluates the six unconstrained metrics. Renders a tidy dataframe mirroring Table 1.
+  - **[`goal_directed_optimization.ipynb`](./notebooks/goal_directed_optimization.ipynb)** – Goal-directed demo: Runs a short **AugmentedHC/REINVENT** loop (e.g., `Perindopril_MPO`), logs rewards, and plots the training curve.
 - [`src`](./src): **All Python source code**  
   - [`data_loader`](./src/data_loader): dataset & tokenization  *(see [`src/data_loader/README.md`](./src/data_loader/README.md))*  
   - [`models`](./src/models): all model classes and helpers used in NovoMolGen:

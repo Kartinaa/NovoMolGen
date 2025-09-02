@@ -533,7 +533,7 @@ class REINVENTTrainer(PolicyTrainer):
         )
         return metrics
 
-    def train(self, resume_from_checkpoint: bool = False):
+    def train(self, resume_from_checkpoint: bool = False, skip_eval: bool = False):
         """
         Full training loop for REINVENT, including experience replay preloading,
         iterative optimization, logging, and evaluation.
@@ -587,9 +587,11 @@ class REINVENTTrainer(PolicyTrainer):
             if len(self.generated_molecules_to_reward.keys()) > self.config.oracle_call_budget:
                 break
 
-        self._final_evaluation(model=model, save_path=self.config.output_dir)
-        self._save_checkpoint(model=model, final_checkpoint=True)
-        logger.info("\n\nTraining completed. Do not forget to share your model on huggingface.co/models\n\n")
+        if not skip_eval:
+            self._final_evaluation(model=model, save_path=self.config.output_dir)
+            self._save_checkpoint(model=model, final_checkpoint=True)
+        logger.info("\n\nTraining completed\n")
+        logger.info(f"Training logs:\n{self.trainer_state.log_history[-1]}")
 
     def _final_evaluation(self, model: NovoMolGen, save_path: str):
         """

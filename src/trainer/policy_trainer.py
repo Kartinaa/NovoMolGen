@@ -357,7 +357,7 @@ class PolicyTrainer:
 
         raise NotImplementedError
 
-    def train(self, resume_from_checkpoint: bool = False):
+    def train(self, resume_from_checkpoint: bool = False, skip_eval: bool = False):
 
         raise NotImplementedError
 

@@ -293,3 +293,109 @@ def _prepare_base_model(config: DictConfig) -> Tuple[NovoMolGen, Any]:
         model.mol_type = config.dataset.mol_type
 
     return model, tokenizer
+
+
+def set_seed(seed: int) -> None:
+    """Set seed for all relevant libraries."""
+    import random
+    import numpy as np
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    os.environ["NVIDIA_TF32_OVERRIDE"] = "0"
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    transformers.set_seed(seed)
+    datasets.config.INFINITE_DATASET_SEED = seed
+
+
+
+def plot_reward_with_molecules(trainer, steps_to_show=(100,300,500,700,900)):
+
+    from rdkit import Chem
+    from rdkit.Chem import Draw
+    import numpy as np, pandas as pd, matplotlib.pyplot as plt
+    from matplotlib.offsetbox import OffsetImage, AnnotationBbox
+
+    df = pd.DataFrame(trainer.trainer_state.log_history)
+    xcol = "train/num_oracle_calls" if "train/num_oracle_calls" in df else "train/global_step"
+    keep = [xcol, "train/top_1_reward", "train/top_10_reward", "train/average_reward"]
+    keep = [c for c in keep if c in df]
+    df = df[keep].dropna(how="all").sort_values(xcol).groupby(xcol, as_index=False).last()
+
+    win = max(1, len(df)//50)
+    for c in ["train/top_1_reward", "train/top_10_reward", "train/average_reward"]:
+        if c in df:
+            df[c+"_smooth"] = df[c].rolling(win, min_periods=1).mean()
+    ycurve = "train/top_1_reward_smooth" if "train/top_1_reward_smooth" in df else ( "train/top_1_reward" if "train/top_1_reward" in df else df.columns[1] )
+
+    fig, ax = plt.subplots(figsize=(16,7))
+    for c, label in [
+        ("train/top_1_reward_smooth", "Top-1 reward"),
+        ("train/top_10_reward_smooth", "Top-10 reward"),
+    ]:
+        if c in df:
+            ax.plot(df[xcol], df[c], label=label)
+
+    # Customize borders
+    ax.spines["top"].set_visible(False)  # Hide the top border
+    ax.spines["right"].set_visible(False)  # Hide the right border
+    ax.spines["left"].set_visible(False)  # Hide the left border
+    ax.spines["bottom"].set_linewidth(2)  # Thicken the bottom border
+    ax.set_ylabel("Reward", fontsize=12)
+    ax.set_xlabel("Number of oracle calls")
+
+    # Add horizontal grid behind the lines
+    ax.yaxis.grid(True, which="major", linestyle=":")
+    ax.set_axisbelow(True)
+    ax.legend(loc='right', ncol=1, frameon=False, fontsize=12)
+
+    # --- pick molecules by oracle-call index (dict preserves insertion order in Py3.7+)
+    mol_seq = list(trainer.generated_molecules_to_reward.items())
+    n = len(mol_seq)
+    chosen = [s for s in steps_to_show if 1 <= s <= n]
+    if not chosen:
+        # fallback to 20/40/60/80/100% of seen calls
+        chosen = [max(1, int(n*t)) for t in (0.2,0.4,0.6,0.8,1.0)]
+
+    # --- helper: render SMILES → PIL image
+    def smiles_img(smiles, size=(480,320)):
+        m = Chem.MolFromSmiles(smiles)
+        if m is None: return None
+        return Draw.MolToImage(m, size=size)
+
+    # --- overlay thumbnails
+    xvals = df[xcol].astype(float).values
+    yvals = df[ycurve].astype(float).values
+    yr = ax.get_ylim(); yspan = yr[1]-yr[0]
+
+    for step in chosen:
+        top_idx = torch.tensor(list((trainer.generated_molecules_to_reward.values())))[:step].argmax()
+        smiles, rew = mol_seq[top_idx]
+        img = smiles_img(smiles)
+        if img is None: continue
+        # interpolate y on the curve at this x (step ~ oracle calls index)
+        x = float(step)
+        # if xcol != num_oracle_calls, map by proportion
+        if not xcol.endswith("num_oracle_calls"):
+            x = xvals[-1] * (step / max(1, n-1))
+        y = float(np.interp(x, xvals, yvals))
+        ab = AnnotationBbox(
+            OffsetImage(img, zoom=0.23),
+            (x, y),
+            xybox=(0, 75), boxcoords="offset points", frameon=True,
+            bboxprops=dict(edgecolor="0.7", linewidth=0.8),
+            arrowprops=dict(arrowstyle="->", lw=0.8, color="0.5"),
+        )
+        ax.add_artist(ab)
+        ax.text(
+            x, y + 0.02*yspan, f"{float(getattr(rew,'item',lambda:rew)()):.3f}",
+            ha="center", va="bottom", fontsize=9,
+            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="0.7", alpha=0.9)
+        )
+
+    plt.tight_layout()
+    plt.show()
