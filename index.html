@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <!-- Meta tags for social media banners, these should be filled in appropriatly as they are your "business card" -->
+  <!-- Replace the content tag with appropriate information -->
+  <meta name="description" content="NovoMolGen: Rethinking Molecular Language Model Pretraining">
+  <meta property="og:title" content="NovoMolGen: Rethinking Molecular Language Model Pretraining"/>
+  <meta property="og:description" content="Open-Source Foundation Models for De novo Molecule Generation"/>
+  <meta property="og:url" content="https://novomolgen.github.io"/>
+  <!-- Path to banner image, should be in the path listed below. Optimal dimenssions are 1200X630-->
+  <meta property="og:image" content="static/images/molecule_generation.jpeg" />
+  <meta property="og:image:width" content="1200"/>
+  <meta property="og:image:height" content="630"/>
+
+
+  <meta name="twitter:title" content="NovoMolGen">
+  <meta name="twitter:description" content="NovoMolGen: Open-Source Foundation Models for De novo Molecule Generation">
+  <!-- Path to banner image, should be in the path listed below. Optimal dimenssions are 1200X600-->
+  <meta name="twitter:image" content="static/images/molecule_generation.jpeg">
+  <meta name="twitter:card" content="summary_large_image">
+  <!-- Keywords for your paper to be indexed by-->
+  <meta name="keywords" content="NovoMolGen, Molecular Language Models, De novo Molecule Generation">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+
+  <title>NovoMolGen</title>
+  <link rel="icon" type="image/x-icon" href="static/images/molecule.png">
+  <link href="https://fonts.googleapis.com/css?family=Google+Sans|Noto+Sans|Castoro"
+  rel="stylesheet">
+
+  <link rel="stylesheet" href="static/css/bulma.min.css">
+  <link rel="stylesheet" href="static/css/bulma-carousel.min.css">
+  <link rel="stylesheet" href="static/css/bulma-slider.min.css">
+  <link rel="stylesheet" href="static/css/fontawesome.all.min.css">
+  <link rel="stylesheet"
+  href="https://cdn.jsdelivr.net/gh/jpswalsh/academicons@1/css/academicons.min.css">
+  <link rel="stylesheet" href="static/css/index.css">
+
+  <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
+  <script src="https://documentcloud.adobe.com/view-sdk/main.js"></script>
+  <script defer src="static/js/fontawesome.all.min.js"></script>
+  <script src="static/js/bulma-carousel.min.js"></script>
+  <script src="static/js/bulma-slider.min.js"></script>
+  <script src="static/js/index.js"></script>
+</head>
+<body>
+
+
+  <section class="hero">
+    <div class="hero-body">
+      <div class="container is-max-desktop">
+        <div class="columns is-centered">
+          <div class="column has-text-centered">
+            <h1 class="title is-1 publication-title">NovoMolGen: Rethinking Molecular Language Model Pretraining</h1>
+            <div class="is-size-5 publication-authors">
+              <!-- Paper authors -->
+              <span class="author-block">
+                <a href="https://kmchiti.github.io/" target="_blank">Kamran Chitsaz</a><sup>1,2,*</sup>,</span>
+                <span class="author-block">
+                  <a href="https://roshanmsb.github.io" target="_blank">Roshan Balaji</a><sup>5,6,7,*</sup>,</span>
+                  <span class="author-block">
+                    <a href="https://qfournier.github.io/" target="_blank">Quentin Fournier</a><sup>2</sup>,</span><br>
+                    <span class="author-block">
+                    <a href="https://biotech.iitm.ac.in/innerfaculty.php?fname=Nirav%20P%20Bhatt" target="_blank">Nirav Pravinbhai Bhatt</a><sup>5,6,7,8</sup>,</span>
+                    <span class="author-block">
+                    <a href="https://sarathchandar.in/" target="_blank">Sarath Chandar</a><sup>1,2,3,4</sup>
+                  </span>
+                  </div>
+
+                  <div class="is-size-5 publication-authors">
+                    <span class="author-block"><br><sup>1</sup> Chandar Research Lab, <sup>2</sup> Mila – Quebec AI Institute, <sup>3</sup> Polytechnique Montréal, <sup>4</sup> Canada CIFAR AI Chair</span>
+                    <span class="author-block">
+                      <sup>5</sup> BioSystems Engineering and Control Lab,
+                      <sup>6</sup> Wadhwani School of Data Science and AI, IIT Madras,
+                      <br><sup>7</sup> The Centre for Integrative Biology and Systems Medicine (IBSE),
+                      <sup>8</sup> IIT Madras Zanzibar
+                    </span>
+                    <span class="eql-cntrb"><small><br><sup>*</sup>Indicates Equal Contribution</small></span>
+                  </div>
+
+                  <div class="column has-text-centered">
+                    <div class="publication-links">
+                         <!-- Arxiv PDF link -->
+                      <span class="link-block">
+                        <a href="https://arxiv.org/pdf/2508.13408.pdf" target="_blank"
+                        class="external-link button is-normal is-rounded is-dark">
+                        <span class="icon">
+                          <i class="fas fa-file-pdf"></i>
+                        </span>
+                        <span>Paper</span>
+                      </a>
+                    </span>
+
+                    <!-- ArXiv abstract Link -->
+                    <span class="link-block">
+                      <a href="https://arxiv.org/abs/2508.13408" target="_blank"
+                      class="external-link button is-normal is-rounded is-dark">
+                      <span class="icon">
+                        <i class="ai ai-arxiv"></i>
+                      </span>
+                      <span>arXiv</span>
+                    </a>
+                  </span>
+
+                    <!-- HuggingFace link -->
+                    <span class="link-block">
+                      <a href="https://huggingface.co/collections/chandar-lab/novomolgen-681bce8b0e73b5dc7a3b0ff1" target="_blank"
+                      class="external-link button is-normal is-rounded is-dark">
+                      <span class="icon">
+                        <img src="static/images/hf-logo.svg" alt="HuggingFace Logo">
+                      </span>
+                      <span>HuggingFace</span>
+                    </a>
+                  </span>
+
+                  <!-- Github link -->
+                  <span class="link-block">
+                    <a href="https://github.com/chandar-lab/NovoMolGen/" target="_blank"
+                    class="external-link button is-normal is-rounded is-dark">
+                    <span class="icon">
+                      <i class="fab fa-github"></i>
+                    </span>
+                    <span>Code</span>
+                  </a>
+                </span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+
+<!-- Teaser video-->
+<section class="hero teaser">
+  <div class="container is-max-desktop">
+    <div class="hero-body">
+      <video poster="" id="tree" autoplay controls muted loop height="100%">
+        <!-- Your video here -->
+        <source src="static/videos/novomolgen.mp4"
+        type="video/mp4">
+      </video>
+      <h2 class="subtitle has-text-centered">
+        We introduce <b>NovoMolGen</b>, a family of open-source transformer-based foundation models pretrained on 1.5 billion molecules, evaluating the effects of molecular representation, tokenization, model scaling, and dataset size on <i>de novo</i> generation.
+      </h2>
+    </div>
+  </div>
+</section>
+<!-- End teaser video -->
+
+<!-- Paper abstract -->
+<section class="section hero">
+  <div class="container is-max-desktop">
+    <div class="columns is-centered">
+      <div class="column is-full">
+        <h2 class="title is-3 has-text-centered">AI in Chemistry: A Quest for New Medicines</h2>
+        <div class="columns">
+          <div class="column is-three-quarters">
+            <div class="content has-text-justified">
+              <p>
+                The search for new medicines is one of humanity's toughest challenges, made harder by the sheer size of the chemical universe. Scientists estimate there could be between 10²³ and 10⁶⁰ possible drug-like molecules, a number so vast that testing even a fraction of them is impossible. To tackle this, researchers are turning to artificial intelligence. Molecular Large Language Models (Mol-LLMs) treat molecules as text-like strings and apply the same transformer technology behind popular tools like ChatGPT. Inspired by breakthroughs in natural language processing, many in the field have assumed that scaling up, bigger models trained on more data, will naturally lead to better results. But chemistry is not a natural language. While words follow flexible rules shaped by context, molecules obey strict physical and chemical laws, and their meaning is tied to some chemical function. 
+              </p>
+            </div>
+          </div>
+          <div class="column is-one-quarter">
+            <figure class="image">
+              <img src="static/images/token_example.jpeg" alt="Molecular Tokenization Example" style="width: 100%; height: auto;"/>
+            </figure>
+          </div>
+        </div>
+        <div class="content has-text-justified">
+          <p>
+            This raises an important question: Does scaling up really work the same way in drug discovery? We challenge this assumption with <b>NovoMolGen</b>, a family of open-source foundation models for chemistry and present the largest systematic study (>30,000 experiments) to date on Mol-LLMs by evaluating the effects of molecular representation, tokenization, model scaling, and dataset size on <i>de novo</i> generation.
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+<!-- End paper abstract -->
+
+
+<!-- Results Section 2: Pretraining Results -->
+<section class="section hero">
+  <div class="container is-max-desktop">
+    <div class="columns is-centered">
+      <div class="column is-full">
+        <h2 class="title is-3 has-text-centered">Establishing a New Standard in Molecular Design</h2>
+        <div class="content has-text-justified">
+          <p>
+            NovoMolGen achieves state-of-the-art performance in goal-directed molecular design, where the task is to generate new compounds with specific, multi-property profiles under strict oracle budget constraints. On the Practical Molecular Optimization (PMO) benchmark, which captures a wide range of drug discovery challenges, NovoMolGen consistently outperforms strong baselines, including widely used frameworks like REINVENT and recent state-of-the-art methods like <i>f</i>-RAG. Importantly, these improvements are observed not just for the largest models but also for smaller variants, highlighting that the approach is broadly effective rather than dependent on scale alone.
+          </p>
+        </div>
+        <div class="has-text-centered" style="margin: 20px 0;">
+          <figure class="image">
+            <img src="static/images/pmo_results.jpg" alt="PMO Results" style="max-width: 100%; height: auto; margin: 0 auto; display: block;"/>
+          </figure>
+        </div>
+        <div class="columns">
+          <div class="column is-one-half">
+            <div class="content has-text-justified">
+              <p>
+                In protein-ligand docking, NovoMolGen achieves better performance compared to multiple existing models. Our models generate molecules that bind more strongly to protein targets and identify a higher proportion of candidates that are novel, drug-like, and synthesizable compared to previous methods. Across multiple targets (including the cancer target <b><i>parp1</b></i>), our models deliver high-quality molecules with a strict oracle budget of 3000 molecule evaluations per run. This demonstrates that NovoMolGen has learned a strong chemical prior, enabling it to explore chemical space effectively and propose candidates that meet multiple medicinal chemistry criteria simultaneously. The NovoMolGen models achieve hit ratios often twice as high as strong baselines. These gains hold even for the smaller variants: scaling up to 300M parameters yields only modest improvements, suggesting the 32M and 157M models were already capturing the essentials of designing ligands that bind strongly to multiple protein targets.        
+              </p>
+            </div>
+          </div>
+          <div class="column is-one-half">
+            <figure class="image">
+              <img src="static/images/docking_pose.jpeg" alt="Docking Pose" style="width: 98%; height: auto;"/>
+              <figcaption class="has-text-centered" style="margin-top: 10px; font-size: 0.9em; color: #666;">
+                Molecular docking visualization showing NovoMolGen-generated compounds binding to protein targets <b><i>parp1</b></i> (top) and <b><i>braf</b></i> (bottom)
+              </figcaption>
+            </figure>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+
+<section class="section hero">
+  <div class="container is-max-desktop">
+    <div class="columns is-centered">
+      <div class="column is-full">
+        <h2 class="title is-3 has-text-centered">The Scaling Problem</h2>
+        <div class="content has-text-justified">
+          <p>
+            In the world of AI, a common belief is that bigger is always better. The thinking goes that larger models trained on more data will inevitably lead to better performance. Our research shows this isn't necessarily true for chemistry. We found that a relatively small model can learn the fundamental rules of molecular structure very quickly, and making the model bigger or training it for longer yields surprisingly little benefit.   
+          </p>
+        </div>
+        <div class="has-text-centered" style="margin: 20px 0;">
+          <figure class="image">
+            <img src="static/images/pretrain_results.jpg" alt="Pretrain Results" style="max-width: 85%; height: auto; margin: 0 auto; display: block;"/>
+          </figure>
+        </div>
+        <div class="content has-text-justified">
+          <p>
+            Performance on key design tasks plateaued remarkably early in the training process. This suggests that once a model has mastered the basic "grammar" of chemistry, simply showing it more examples doesn't teach it much more about designing effective molecules. This is a game-changing insight. It means that state-of-the-art results in molecular design don't require massive, resource-intensive models. This democratizes the field, allowing academic labs and smaller research groups to contribute to the cutting edge of drug discovery without needing a supercomputer.                 </p>
+          </p>
+        </div>
+          <div class="has-text-centered" style="margin: 20px 0;">
+          <figure class="image">
+            <img src="static/images/training_progress.jpg" alt="Training Progress" style="max-width: 80%; height: auto; margin: 0 auto; display: block;"/>
+          </figure>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section hero">
+  <div class="container is-max-desktop">
+    <div class="columns is-centered">
+      <div class="column is-full">
+        <h2 class="title is-3 has-text-centered">Are We Measuring What Actually Matters?</h2>
+        <div class="columns">
+          <div class="column is-one-half">
+            <div class="content has-text-justified">
+              <p>
+                Our investigation also revealed a critical disconnect: the metrics we use to grade these models during pretraining don't predict how well they'll perform on real-world tasks. A popular metric, Fréchet ChemNet Distance (FCD), measures how well a model can generate a batch of molecules that looks like a reference dataset. But we found that a model's FCD score has very little correlation with its ability to design a novel molecule for a specific purpose. We were grading models on their ability to copy what's already known, not on their creativity or efficiency in solving a new problem. This finding is a call to action for the research community to develop new benchmarks that measure what truly matters: a model's ability to be an efficient and innovative partner in the scientific discovery process.
+              </p>
+            </div>
+          </div>
+          <div class="column is-one-half">
+            <figure class="image">
+              <img src="static/images/fcd_scatter.jpg" alt="FCD Scatter Plot" style="width: 100%; height: auto;"/>
+              <figcaption class="has-text-centered" style="margin-top: 10px; font-size: 0.9em; color: #666;">
+                FCD does not correlate with downstream task performance: The plot compares the FCD score against the PMO benchmark score            
+              </figcaption>
+            </figure>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+
+<section class="section hero">
+  <div class="container is-max-desktop">
+    <div class="columns is-centered">
+      <div class="column is-full">
+        <h2 class="title is-3 has-text-centered">The Path Forward: An Open-Source Foundation for Discovery</h2>
+        <div class="has-text-centered" style="margin: 20px 0;">
+          <figure class="image">
+            <img src="static/images/molecule_generation.jpeg" alt="Molecule Generation" style="max-width: 80%; height: auto; margin: 0 auto; display: block;"/>
+          </figure>
+        </div>
+        <div class="content has-text-justified">
+        <p>
+          Our findings point to a clear new direction for the field. To build better models, we need to shift our focus from teaching them chemical syntax (what molecules look like) to teaching them functional semantics (what molecules do). The vast chemical databases used for training are great for learning the rules of assembly, but they lack information about biological function.   
+        </p>
+        <p>
+          Future models should be trained with objectives that are directly related to a molecule's purpose, such as its interaction with a protein target or its desired physicochemical properties. On a more practical note, our study also confirmed that better ways of representing molecules, like using Byte Pair Encoding (BPE) instead of relying on atoms to recognize common chemical building blocks, consistently improve efficiency and performance.
+        </p>
+        <p>
+          By providing a state-of-the-art foundation model, our work enables any lab, regardless of computational resources, to bypass the expensive pretraining phase and focus directly on the creative and scientific challenges of fine-tuning and application. We have made our pretrained models, datasets, and code fully open-source to empower other researchers and accelerate progress, whether finding a new drug or designing a novel material. We invite the community to build on this work and help shape the future of AI-driven science.         </p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+
+<!--BibTex citation -->
+  <section class="section" id="BibTeX">
+    <div class="container is-max-desktop content">
+      <h2 class="title">BibTeX</h2>
+      <pre><code>@article{chitsaz2025novomolgenrethinkingmolecularlanguage,
+      title={NovoMolGen: Rethinking Molecular Language Model Pretraining}, 
+      author={Kamran Chitsaz and Roshan Balaji and Quentin Fournier and Nirav Pravinbhai Bhatt and Sarath Chandar},
+      year={2025},
+      eprint={2508.13408},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2508.13408}, 
+}</code></pre>
+    </div>
+</section>
+<!--End BibTex citation -->
+
+
+  <footer class="footer">
+  <div class="container">
+    <div class="columns is-centered">
+      <div class="column is-8">
+        <div class="content">
+
+          <p>
+            This page was built using the <a href="https://github.com/eliahuhorwitz/Academic-project-page-template" target="_blank">Academic Project Page Template</a> which was adopted from the <a href="https://nerfies.github.io" target="_blank">Nerfies</a> project page.
+            <br> This website is licensed under a <a rel="license"  href="http://creativecommons.org/licenses/by-sa/4.0/" target="_blank">Creative
+            Commons Attribution-ShareAlike 4.0 International License</a>.
+          </p>
+
+        </div>
+      </div>
+    </div>
+  </div>
+</footer>
+
+<!-- Statcounter tracking code -->
+  
+<!-- You can add a tracker to track page visits by creating an account at statcounter.com -->
+
+    <!-- End of Statcounter Code -->
+
+  </body>
+  </html>
