@@ -11,6 +11,10 @@
 
 🤗 **Checkpoints, tokenizers, and datasets:** [https://huggingface.co/collections/chandar-lab/novomolgen](https://huggingface.co/collections/chandar-lab/novomolgen-681bce8b0e73b5dc7a3b0ff1)
 
+<img src="./static/images/molecule.png" alt="logo" width="20" style="vertical-align:middle;"/>**Website:** [chandar-lab.github.io/NovoMolGen](https://chandar-lab.github.io/NovoMolGen/)
+
+
+
 ---
 
 
