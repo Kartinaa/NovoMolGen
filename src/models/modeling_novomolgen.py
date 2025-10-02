@@ -4,9 +4,10 @@ import os.path
 import re
 import shutil
 import inspect
-from typing import Optional, Union
+from typing import Optional, Union, List
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from transformers import LlamaConfig
 from transformers.loss.loss_utils import LOSS_MAPPING
@@ -32,6 +33,132 @@ except ImportError:
     llama_config_to_gpt2_config = None
     inv_remap_state_dict_hf_llama = None
 
+class CrossAttentionAdapter(nn.Module):
+    """
+    Pure Cross-Attention adapter module for conditional generation.
+    
+    Takes hidden_states as Query and cond_tokens as Key/Value.
+    Only performs cross-attention without residual connection or layer norm.
+    
+    Args:
+        config: Model configuration containing hidden_size, num_attention_heads
+        dropout: Dropout rate for attention output
+    """
+    
+    def __init__(self, config, dropout: float = 0.1):
+        super().__init__()
+        
+        # Validate config
+        if not hasattr(config, 'hidden_size'):
+            raise ValueError("Config must have 'hidden_size' attribute")
+        if not hasattr(config, 'num_attention_heads'):
+            raise ValueError("Config must have 'num_attention_heads' attribute")
+        
+        self.hidden_size = config.hidden_size
+        self.num_heads = config.num_attention_heads
+        self.head_dim = self.hidden_size // self.num_heads
+        
+        # Validate head dimension
+        if self.hidden_size % self.num_heads != 0:
+            raise ValueError(f"hidden_size ({self.hidden_size}) must be divisible by num_attention_heads ({self.num_heads})")
+        
+        # Multi-head cross-attention
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=self.hidden_size,
+            num_heads=self.num_heads,
+            dropout=dropout,
+            batch_first=True,
+            bias=True
+        )
+        
+        # Note: Dropout is handled in the patched forward, not here
+    
+    def forward(
+        self, 
+        hidden_states: torch.Tensor, 
+        cond_tokens: torch.Tensor,
+        cond_attention_mask: Optional[torch.Tensor] = None,
+        return_attention_weights: bool = False
+    ) -> Union[torch.Tensor, tuple]:
+        """
+        Forward pass of CrossAttention adapter.
+        
+        Args:
+            hidden_states: Query tensor [B, T, d] where B=batch, T=sequence_length, d=hidden_size
+            cond_tokens: Key/Value tensor [B, Lc, d] where Lc=condition_length (Lc need to be 
+            padded and don't need to have the same length as hidden_states)
+            cond_attention_mask: Optional attention mask for cond_tokens [B, Lc] (True=padding) (Optional, 
+            highly likely `None`)
+            return_attention_weights: Whether to return attention weights
+            
+        Returns:
+            If return_attention_weights=False: attention output tensor [B, T, d]
+            If return_attention_weights=True: (attention output tensor [B, T, d], attention_weights [B, num_heads, T, Lc])
+        """
+        
+        # Shape validation
+        if hidden_states.dim() != 3:
+            raise ValueError(f"hidden_states must be 3D tensor [B, T, d], got shape {hidden_states.shape}")
+        if cond_tokens.dim() != 3:
+            raise ValueError(f"cond_tokens must be 3D tensor [B, Lc, d], got shape {cond_tokens.shape}")
+        
+        B, T, d = hidden_states.shape
+        B_cond, Lc, d_cond = cond_tokens.shape
+        
+        # Batch size consistency check
+        if B != B_cond:
+            raise ValueError(f"Batch size mismatch: hidden_states has B={B}, cond_tokens has B={B_cond}")
+        
+        # Hidden size consistency check
+        # TODO: yb: Do we really need same hidden size?
+        if d != self.hidden_size:
+            raise ValueError(f"hidden_states hidden_size {d} != expected {self.hidden_size}")
+        if d_cond != self.hidden_size:
+            raise ValueError(f"cond_tokens hidden_size {d_cond} != expected {self.hidden_size}")
+        
+        # Handle empty condition sequences
+        if Lc == 0:
+            # Return zero output for empty conditions
+            zero_output = torch.zeros_like(hidden_states)
+            if return_attention_weights:
+                # Return empty attention weights
+                attn_weights = torch.zeros(B, self.num_heads, T, 0, device=hidden_states.device, dtype=hidden_states.dtype)
+                return zero_output, attn_weights
+            else:
+                return zero_output
+        
+        # Attention mask validation
+        if cond_attention_mask is not None:
+            if cond_attention_mask.dim() != 2:
+                raise ValueError(f"cond_attention_mask must be 2D tensor [B, Lc], got shape {cond_attention_mask.shape}")
+            if cond_attention_mask.shape[0] != B:
+                raise ValueError(f"cond_attention_mask batch size {cond_attention_mask.shape[0]} != {B}")
+            if cond_attention_mask.shape[1] != Lc:
+                raise ValueError(f"cond_attention_mask length {cond_attention_mask.shape[1]} != {Lc}")
+            # Ensure boolean mask
+            if cond_attention_mask.dtype != torch.bool:
+                cond_attention_mask = cond_attention_mask.bool()
+        
+        # Cross-attention: hidden_states (Q) attends to cond_tokens (K, V)
+        attn_output, attn_weights = self.cross_attn(
+            query=hidden_states,           # [B, T, d]
+            key=cond_tokens,               # [B, Lc, d] 
+            value=cond_tokens,             # [B, Lc, d]
+            key_padding_mask=cond_attention_mask,  # [B, Lc] - True for padding tokens
+            need_weights=return_attention_weights,
+            average_attn_weights=False
+        )
+        
+        # Note: Dropout is applied in the patched forward method, not here
+        
+        if return_attention_weights:
+            return attn_output, attn_weights
+        else:
+            return attn_output
+    
+    def extra_repr(self) -> str:
+        """Extra representation string for debugging."""
+        return f"hidden_size={self.hidden_size}, num_heads={self.num_heads}"
 
 def state_dict_from_pretrained(model_name, checkpoint_path: str = "", device=None, dtype=None, **kwargs):
     """
@@ -88,6 +215,10 @@ class NovoMolGenConfig(LlamaConfig):
                  fused_dropout_add_ln: bool = True,
                  residual_in_fp32: bool = True,
                  loss_type: str = 'ForCausalLM',
+                 beta_kl: float = 0.1,
+                 enable_cross_attn: bool = False,
+                 cross_layers: Optional[List[int]] = None,
+                 cond_tokens_len: int = 128,
                  **kwargs
                  ):
         super().__init__(**kwargs)
@@ -97,6 +228,10 @@ class NovoMolGenConfig(LlamaConfig):
         self.fused_dropout_add_ln = fused_dropout_add_ln
         self.residual_in_fp32 = residual_in_fp32
         self.loss_type = loss_type
+        self.beta_kl = float(beta_kl)
+        self.enable_cross_attn = enable_cross_attn
+        self.cross_layers = cross_layers if cross_layers is not None else []
+        self.cond_tokens_len = int(cond_tokens_len)
         self.auto_map = {"AutoModelForCausalLM": "modeling_novomolgen.NovoMolGen"}
 
     @classmethod
@@ -133,6 +268,148 @@ class NovoMolGenConfig(LlamaConfig):
         return cls.from_dict(config_dict, **kwargs)
 
 
+class CrossAttentionTransformer(nn.Module):
+    """
+    Custom transformer that supports cross-attention injection at specified layers.
+    This wraps the flash-attn transformer and patches the decoder blocks.
+    """
+    
+    def __init__(self, base_transformer, config):
+        super().__init__()
+        self.base_transformer = base_transformer
+        self.config = config
+        self.enable_cross_attn = getattr(config, 'enable_cross_attn', False)
+        self.cross_layers = getattr(config, 'cross_layers', [])
+        
+        # Initialize cross-attention adapters if enabled
+        if self.enable_cross_attn and self.cross_layers:
+            self.cross_adapters = nn.ModuleDict({
+                str(layer_idx): CrossAttentionAdapter(config) 
+                for layer_idx in self.cross_layers
+            })
+            
+            # Initialize learnable gates for each layer
+            # Use -1.0 for conservative initialization: sigmoid(-1) ≈ 0.27
+            self.gates = nn.ParameterDict({
+                str(layer_idx): nn.Parameter(torch.tensor(-1.0))
+                for layer_idx in self.cross_layers
+            })
+            
+            # Initialize cross-attention dropout
+            self.cross_dropout = nn.Dropout(getattr(config, 'attn_dropout', 0.1))
+            
+            # Patch the transformer blocks to inject cross-attention
+            self._patch_transformer_blocks()
+        else:
+            self.cross_adapters = None
+            self.gates = None
+            self.cross_dropout = None
+    
+    def _patch_transformer_blocks(self):
+        """Patch the transformer blocks to inject cross-attention at specified layers."""
+        # Get the transformer blocks from the base transformer
+        if hasattr(self.base_transformer, 'blocks'):
+            blocks = self.base_transformer.blocks
+        elif hasattr(self.base_transformer, 'layers'):
+            blocks = self.base_transformer.layers
+        else:
+            # Try to find blocks in nested structure
+            blocks = None
+            for attr_name in ['transformer', 'model', 'encoder', 'decoder']:
+                if hasattr(self.base_transformer, attr_name):
+                    nested = getattr(self.base_transformer, attr_name)
+                    if hasattr(nested, 'blocks'):
+                        blocks = nested.blocks
+                        break
+                    elif hasattr(nested, 'layers'):
+                        blocks = nested.layers
+                        break
+        
+        if blocks is None:
+            raise ValueError("Could not find transformer blocks to patch")
+        
+        # Store original forward methods
+        self._original_forwards = {}
+        
+        # Patch each specified layer
+        for layer_idx in self.cross_layers:
+            if layer_idx < len(blocks):
+                block = blocks[layer_idx]
+                self._original_forwards[layer_idx] = block.forward
+                
+                # Create patched forward method with proper closure binding
+                def make_patched_forward(original_forward, adapter, gate, layer_idx, block_bound=block, self_bound=self):
+                    def patched_forward(hidden_states, *args, **kwargs):
+                        # Call original forward (self-attention + MLP)
+                        original_output = original_forward(hidden_states, *args, **kwargs)
+                        
+                        # Handle tuple return (some blocks return (output, rest))
+                        if isinstance(original_output, tuple):
+                            output, rest = original_output[0], original_output[1:]
+                        else:
+                            output = original_output
+                            rest = ()
+                        
+                        # Apply cross-attention if cond_tokens are available
+                        if hasattr(self_bound, '_current_cond_tokens') and self_bound._current_cond_tokens is not None and str(layer_idx) in self_bound.cross_adapters:
+                            # Apply layer norm before cross-attention
+                            normed_output = F.layer_norm(output, output.shape[-1:])
+                            
+                            # Apply cross-attention adapter (pure cross-attention, no residual)
+                            attn_out = adapter(normed_output, self_bound._current_cond_tokens, 
+                                             self_bound._current_cond_attention_mask)
+                            
+                            # Apply dropout to attention output (single dropout point)
+                            attn_out = self_bound.cross_dropout(attn_out)
+                            
+                            # Unified gated residual connection: output = output + sigmoid(gate) * attn_out
+                            gate_value = torch.sigmoid(gate)
+                            output = output + gate_value * attn_out
+                        
+                        # Return in original format
+                        if rest:
+                            return (output,) + rest
+                        else:
+                            return output
+                    return patched_forward
+                
+                # Apply the patch with proper binding
+                block.forward = make_patched_forward(
+                    block.forward, 
+                    self.cross_adapters[str(layer_idx)], 
+                    self.gates[str(layer_idx)], 
+                    layer_idx
+                )
+    
+    def forward(self, input_ids, position_ids=None, inference_params=None, 
+                cond_tokens=None, cond_attention_mask=None):
+        """
+        Forward pass with cross-attention injection at specified layers.
+        
+        Args:
+            input_ids: Input token IDs [B, T]
+            position_ids: Position IDs [B, T] 
+            inference_params: Inference parameters for generation
+            cond_tokens: Condition tokens for cross-attention [B, Lc, d]
+            cond_attention_mask: Attention mask for condition tokens [B, Lc] (True=padding)
+        """
+        # Store condition tokens for use in patched blocks
+        if self.enable_cross_attn and self.cross_adapters:
+            self._current_cond_tokens = cond_tokens
+            self._current_cond_attention_mask = cond_attention_mask
+        
+        # Call the base transformer (with patched blocks)
+        hidden_states = self.base_transformer(input_ids, position_ids=position_ids, 
+                                            inference_params=inference_params)
+        
+        # Clear condition tokens
+        if hasattr(self, '_current_cond_tokens'):
+            self._current_cond_tokens = None
+            self._current_cond_attention_mask = None
+        
+        return hidden_states
+
+
 class NovoMolGen(GPTLMHeadModel):
     def __init__(
             self,
@@ -147,51 +424,189 @@ class NovoMolGen(GPTLMHeadModel):
         config.fused_mlp = self.base_config.fused_mlp
         config.fused_dropout_add_ln = self.base_config.fused_dropout_add_ln
         config.residual_in_fp32 = self.base_config.residual_in_fp32
+        config.enable_cross_attn = self.base_config.enable_cross_attn
+        config.cross_layers = self.base_config.cross_layers
         GPTLMHeadModel.__init__(self, config)
+        
+        # Replace the transformer with our custom cross-attention transformer
+        if self.base_config.enable_cross_attn:
+            self.transformer = CrossAttentionTransformer(self.transformer, config)
+            # Projection to convert a condition vector of length Lc to tokens [B, Lc, d]
+            # We simply lift each scalar to the model hidden size with a linear layer.
+            self.cond_proj = nn.Linear(1, config.n_embd if hasattr(config, 'n_embd') else config.hidden_size, bias=False)
+            
+            # Initialize encoders with proper dimensions for the new architecture
+            from .condition import create_ligand_encoder, create_protein_encoder, create_condition_fusion
+            cond_latent_dim = self.base_config.cond_tokens_len // 2  # z/2 as specified
+            
+            # Ligand encoder: takes ifp [B, 16384] and ligand_vec [B, 1536], outputs mu/logvar [B, z_dim]
+            self.ligand_encoder = create_ligand_encoder(
+                latent_dim=cond_latent_dim,
+                ligand_input_dim=cond_latent_dim,  # This will be ignored in the new two-tower architecture
+                hidden_dim=256,
+                dropout=0.1,
+                d_ifp=16384,
+                d_mol=1536,
+                d_embed=768,
+                z_dim=cond_latent_dim,
+            )
+            
+            # Protein encoder: takes pocket_vec [B, 512] and evo_vec [B, 1280], outputs protein condition [B, z_dim]
+            self.protein_encoder = create_protein_encoder(
+                latent_dim=cond_latent_dim,
+                protein_input_dim=cond_latent_dim,  # This will be ignored in the new fusion architecture
+                dropout=0.1,
+                pocket_dim=512,
+                evo_dim=1280,
+                common_dim=cond_latent_dim,
+                out_dim=cond_latent_dim,
+            )
+            
+            # Condition fusion: combines protein and ligand conditions
+            self.condition_fusion = create_condition_fusion(
+                protein_dim=cond_latent_dim,
+                ligand_dim=cond_latent_dim,
+                out_dim=cond_latent_dim,
+                common_dim=cond_latent_dim,
+                dropout=0.1,
+                use_cross_attn=True,
+            )
 
     # TODO: here we ignore attention_mask to make it compatible with HF trainer. The MHA in flash-attention should
     #  be reimplement and integrate attention_mask like here:
     #  https://github.com/huggingface/transformers/blob/0864dd3beb238b7bec3528a3d1d6c17a28f51a51/src/transformers/models/llama/modeling_llama.py#L536
     def forward(self, input_ids, attention_mask: Optional[torch.FloatTensor] = None,
                 labels: Optional[torch.LongTensor] = None, return_dict: Optional[bool] = None,
-                position_ids=None, inference_params=None, num_last_tokens=0, **loss_kwargs):
+                position_ids=None, inference_params=None, num_last_tokens=0,
+                cond_tokens: Optional[torch.Tensor] = None,
+                cond_attention_mask: Optional[torch.Tensor] = None,
+                # Condition feature inputs
+                pocket_vec: Optional[torch.Tensor] = None,
+                evo_vec: Optional[torch.Tensor] = None,
+                ifp: Optional[torch.Tensor] = None,
+                ligand_vec: Optional[torch.Tensor] = None,
+                **loss_kwargs):
         """
                 input_ids: (batch, seqlen) int tensor
                 inference_params: for generation. Adapted from Megatron-LM (and Apex)
                 https://github.com/NVIDIA/apex/blob/3ff1a10f72ec07067c4e44759442329804ac5162/apex/transformer/testing/standalone_transformer_lm.py#L470
                 num_last_tokens: if > 0, only return the logits for the last n tokens
+                cond_tokens: (batch, cond_len, hidden_size) tensor for cross-attention
+                cond_attention_mask: (batch, cond_len) tensor for condition masking
                 """
         assert (
                 input_ids.ndim == 2
         ), f"Expected `input_ids` to have shape [b, slen], but got shape {input_ids.shape}"
-        b, slen = input_ids.shape
-        hidden_states = self.transformer(
-            input_ids, position_ids=position_ids, inference_params=inference_params
-        )
+        b, slen = input_ids.shape # b = batch size, slen = sequence length
+        ### position_ids: (batch, seqlen) int tensor, hidden_states: (batch, seqlen, hidden_size)
+        # Build cond_tokens from provided condition features using the new encoder architecture
+        if (
+            self.base_config.enable_cross_attn
+            and cond_tokens is None
+            and (pocket_vec is not None or evo_vec is not None or ifp is not None or ligand_vec is not None)
+        ):
+            bsz = input_ids.size(0)
+            device = input_ids.device
+            dtype = torch.float32
+            
+            # Process protein condition: pocket_vec + evo_vec -> protein_condition
+            if pocket_vec is not None and evo_vec is not None:
+                protein_condition = self.protein_encoder(pocket_vec, evo_vec)
+            else:
+                # Fallback to dummy protein condition
+                cond_latent_dim = self.base_config.cond_tokens_len // 2
+                protein_condition = torch.zeros(bsz, cond_latent_dim, dtype=dtype, device=device)
+            
+            # Process ligand condition: ifp + ligand_vec -> mu, logvar, then sample z
+            if ifp is not None and ligand_vec is not None:
+                mu, sigma, logvar = self.ligand_encoder(ifp, ligand_vec, return_logvar=True)
+                # Sample z from posterior using reparameterization trick
+                eps = torch.randn_like(mu)
+                z = mu + (0.5 * logvar).exp() * eps
+            else:
+                # Fallback: sample z from standard normal (no ligand condition)
+                cond_latent_dim = self.base_config.cond_tokens_len // 2
+                z = torch.randn(bsz, cond_latent_dim, dtype=dtype, device=device)
+            
+            # Fuse protein and ligand conditions using sampled z
+            fused_condition = self.condition_fusion(protein_condition, z)
+            
+            # Project to cond_tokens: [B, Lc, d] where Lc = cond_tokens_len
+            cond_vector = torch.cat([z, fused_condition], dim=-1)  # [B, 2*dz]
+            cond_tokens = self.cond_proj(cond_vector.unsqueeze(-1))  # [B, Lc, d]
+            cond_attention_mask = torch.zeros(cond_tokens.size(0), cond_tokens.size(1), dtype=torch.bool, device=device)
+
+        # Build args for calling the underlying transformer. Only pass cross-attention
+        # kwargs when cross-attention is enabled and the wrapped transformer supports it.
+        transformer_kwargs = {
+            "position_ids": position_ids,
+            "inference_params": inference_params,
+        }
+        if (
+            getattr(self.base_config, "enable_cross_attn", False)
+            and hasattr(self, "transformer")
+            and hasattr(self.transformer, "enable_cross_attn")
+            and getattr(self.transformer, "enable_cross_attn", False)
+        ):
+            transformer_kwargs.update({
+                "cond_tokens": cond_tokens,
+                "cond_attention_mask": cond_attention_mask,
+            })
+        hidden_states = self.transformer(input_ids, **transformer_kwargs)
         if inference_params is not None:
             assert hidden_states.ndim == 3, "sequence_parallel is not supported in generation mode"
+        ### optional extract the last num_last_tokens tokens from the hidden states
         if num_last_tokens > 0:
             hidden_states = hidden_states[:, -num_last_tokens:]
+        ### Optional linear projection layer
         if self.project_out is not None:
             hidden_states = self.project_out(hidden_states)
+        ### Optional output scaling, now the size is still (batch, seqlen, hidden_size)
         if self.output_scale != 1.0:
             hidden_states = hidden_states * self.output_scale
+        ### Convert hidden states to vocabulary logits (batch, seqlen, vocab_size) for calculating loss.
         if not self.norm_head:
             lm_logits = self.lm_head(hidden_states)
         else:
             lm_head_weight = F.normalize(self.lm_head.weight)
             lm_logits = F.linear(hidden_states, lm_head_weight, bias=self.lm_head.bias)
 
-        loss = None
+        # Compute NLL (language modeling loss) if labels provided
+        ### lm_logits: (batch, seqlen, vocab_size), labels: (batch, seqlen): Content: input_ids shifted left by 1
+        ### position, with padding set to -100. Generated by tokenizer.
+        ### Although calculate attention on padding, for loss calculation they are ignored. Thus the efficicy degrade.
+        nll_loss = None
         if labels is not None:
-            loss = self.loss_function(logits=lm_logits, labels=labels, vocab_size=self.base_config.vocab_size,
-                                      **loss_kwargs)
-
-        return CausalLMOutput(
-            loss=loss,
+            nll_loss = self.loss_function(
             logits=lm_logits,
-            hidden_states=hidden_states
-        )
+                labels=labels,
+                vocab_size=self.base_config.vocab_size,
+                **loss_kwargs,
+            )
+
+        # Compute KL(q_phi || N(0, I)) from ligand encoder if condition features are provided
+        kl_loss = None
+        if ifp is not None and ligand_vec is not None and hasattr(self, 'ligand_encoder'):
+            # Use KL from the ligand encoder's posterior
+            mu, sigma, logvar = self.ligand_encoder(ifp, ligand_vec, return_logvar=True)
+            kl_per_sample = 0.5 * (logvar.exp() + mu.pow(2) - 1.0 - logvar)
+            kl_loss = kl_per_sample.sum(dim=-1).mean()
+        else:
+            kl_loss = torch.tensor(0.0, dtype=lm_logits.dtype, device=lm_logits.device)
+
+        # TODO: Implement beta scheduling (linear warm-up from 0 to beta_max over kl_warmup_steps)
+        # For now, use fixed beta value from config
+        beta = getattr(self.base_config, 'beta_kl', 0.1)
+        beta_tensor = torch.tensor(beta, dtype=lm_logits.dtype, device=lm_logits.device)
+
+        # Total loss: nll + beta * kl (if nll is None, just return beta*kl to avoid returning None)
+        loss = None
+        if nll_loss is not None:
+            loss = nll_loss + beta_tensor * kl_loss
+        else:
+            loss = beta_tensor * kl_loss
+        ### Return standard HF output format.
+        return CausalLMOutput(loss=loss, logits=lm_logits, hidden_states=hidden_states)
 
     @property
     def loss_function(self):
@@ -263,7 +678,7 @@ class NovoMolGen(GPTLMHeadModel):
         model = cls(config)
 
         if os.path.exists(pretrained_model_name_or_path):
-            state_dict = torch.load(os.path.join(pretrained_model_name_or_path, checkpoint_path, WEIGHTS_NAME))
+                state_dict = torch.load(os.path.join(pretrained_model_name_or_path, checkpoint_path, WEIGHTS_NAME))
         else:
             state_dict = state_dict_from_pretrained(pretrained_model_name_or_path, checkpoint_path=checkpoint_path, **kwargs)
         model.load_state_dict(state_dict)
@@ -330,5 +745,165 @@ class NovoMolGen(GPTLMHeadModel):
         return output
 
     def prepare_inputs_for_generation(self, input_ids, attention_mask=None, **kwargs):
-        # HF’s GenerationMixin would normally do more, but for a basic LM this usually suffices:
-        return {"input_ids": input_ids, "attention_mask": attention_mask}
+        # HF's GenerationMixin would normally do more, but for a basic LM this usually suffices:
+        model_inputs = {"input_ids": input_ids, "attention_mask": attention_mask}
+        
+        # Only pass cross-attention conditions if cross-attn is enabled
+        if getattr(self.base_config, "enable_cross_attn", False): # Logic: If "enable_cross_attn" exists, return true. Else false.
+            if "cond_tokens" in kwargs:
+                model_inputs["cond_tokens"] = kwargs["cond_tokens"]
+            if "cond_attention_mask" in kwargs:
+                model_inputs["cond_attention_mask"] = kwargs["cond_attention_mask"]
+        
+        return model_inputs
+
+    @torch.inference_mode()
+    def generate_with_condition(
+        self,
+        *,
+        input_ids: Optional[torch.LongTensor] = None,
+        cond_tokens: Optional[torch.Tensor] = None,
+        cond_attention_mask: Optional[torch.Tensor] = None,
+        sample_posterior: bool = False,
+        append: bool = True,
+        prefix_safe: Optional[str] = None,
+        tokenizer = None,
+        # Condition feature inputs
+        pocket_vec: Optional[torch.Tensor] = None,
+        evo_vec: Optional[torch.Tensor] = None,
+        ifp: Optional[torch.Tensor] = None,
+        ligand_vec: Optional[torch.Tensor] = None,
+        **gen_kwargs,
+    ):
+        """
+        Helper for conditional generation using the new encoder architecture.
+
+        Args:
+            input_ids: Optional prompt ids [B, T0] (required if prefix_safe not provided)
+            cond_tokens: Optional pre-built condition tokens [B, Lc0, d] to be appended to
+            cond_attention_mask: Optional cond mask [B, Lc0] (True=padding)
+            sample_posterior: If True, sample z from posterior; else use mu
+            append: If True, append new condition tokens to provided cond_tokens; else replace
+            prefix_safe: Optional SAFE string prefix to tokenize and use as initial input_ids
+            tokenizer: Required if prefix_safe is provided, used to tokenize the prefix
+            pocket_vec: Protein pocket embedding [B, 512]
+            evo_vec: ESM-2 evolutionary embedding [B, 1280]
+            ifp: Interaction fingerprint [B, 16384]
+            ligand_vec: Ligand molecular representation [B, 1536]
+            **gen_kwargs: Passed through to `generate()`
+
+        Returns:
+            If prefix_safe is provided: dict with keys 'full_safe', 'generated_span', 'sequences'
+            Otherwise: torch.LongTensor with generated sequences
+        """
+        if not getattr(self.base_config, "enable_cross_attn", False):
+            raise ValueError("Cross-attention is disabled in config; enable_cross_attn must be True for conditioned generation.")
+
+        # Handle prefix_safe input
+        if prefix_safe is not None:
+            if tokenizer is None:
+                raise ValueError("tokenizer must be provided when prefix_safe is specified.")
+            if input_ids is not None:
+                raise ValueError("Cannot provide both input_ids and prefix_safe.")
+            
+            # Tokenize the prefix
+            prefix_tokens = tokenizer.encode(prefix_safe, return_tensors="pt")
+            input_ids = prefix_tokens
+        elif input_ids is None:
+            raise ValueError("Either input_ids or prefix_safe must be provided for generation.")
+
+        device = input_ids.device
+        bsz = input_ids.size(0)
+
+        # Process condition features using the new encoder architecture
+        if pocket_vec is not None and evo_vec is not None and ifp is not None and ligand_vec is not None:
+            # Use new encoder architecture
+            protein_condition = self.protein_encoder(pocket_vec.to(device), evo_vec.to(device))
+            mu, sigma, logvar = self.ligand_encoder(ifp.to(device), ligand_vec.to(device), return_logvar=True)
+            
+            # Sample z from posterior
+            if sample_posterior:
+                eps = torch.randn_like(mu)
+                z = mu + (0.5 * logvar).exp() * eps
+            else:
+                z = mu
+            
+            # Fuse conditions using sampled z
+            fused_condition = self.condition_fusion(protein_condition, z)
+            
+            # Build condition tokens
+            cond_vector = torch.cat([z, fused_condition], dim=-1)  # [B, 2*dz]
+            new_cond_tokens = self.cond_proj(cond_vector.unsqueeze(-1))  # [B, 2*dz, d]
+            new_cond_mask = torch.zeros(bsz, new_cond_tokens.size(1), dtype=torch.bool, device=device)
+        
+        elif pocket_vec is not None and evo_vec is not None:
+            protein_condition = self.protein_encoder(pocket_vec.to(device), evo_vec.to(device))
+            cond_latent_dim = self.base_config.cond_tokens_len // 2
+            z = torch.randn(bsz, cond_latent_dim, dtype=torch.float32, device=device)
+            fused_condition = self.condition_fusion(protein_condition, z)
+            new_cond_tokens = self.cond_proj(fused_condition.unsqueeze(-1))  # [B, dz, d]
+            new_cond_mask = torch.zeros(bsz, new_cond_tokens.size(1), dtype=torch.bool, device=device)
+        else:
+            # Fallback: use dummy conditions if not all features provided
+            print("no condition features provided")
+            cond_latent_dim = self.base_config.cond_tokens_len // 2
+            # Use the same dtype as the model parameters
+            model_dtype = next(self.parameters()).dtype
+            z = torch.randn(bsz, cond_latent_dim, dtype=model_dtype, device=device)
+            protein_condition = torch.zeros(bsz, cond_latent_dim, dtype=model_dtype, device=device)
+            fused_condition = self.condition_fusion(protein_condition, z)
+            
+            # Build condition tokens
+            cond_vector = torch.cat([z, fused_condition], dim=-1)  # [B, 2*dz]
+            new_cond_tokens = self.cond_proj(cond_vector.unsqueeze(-1))  # [B, 2*dz, d]
+            new_cond_mask = torch.zeros(bsz, new_cond_tokens.size(1), dtype=torch.bool, device=device)
+
+        # Merge with existing condition tokens if provided
+        if cond_tokens is not None and append:
+            assert cond_tokens.dim() == 3 and cond_tokens.size(0) == bsz, "cond_tokens must be [B, Lc0, d]"
+            cond_tokens = torch.cat([cond_tokens.to(device), new_cond_tokens], dim=1)
+            if cond_attention_mask is None:
+                cond_attention_mask = torch.zeros(bsz, cond_tokens.size(1), dtype=torch.bool, device=device)
+            else:
+                assert cond_attention_mask.dim() == 2 and cond_attention_mask.size(0) == bsz, "cond_attention_mask must be [B, Lc0]"
+                cond_attention_mask = torch.cat([cond_attention_mask.to(device), new_cond_mask], dim=1)
+        else:
+            cond_tokens = new_cond_tokens
+            cond_attention_mask = new_cond_mask
+
+        # For now, we'll use a simple approach: generate without conditions
+        # TODO: Implement proper conditional generation that threads cond_tokens through the generation process
+        # This requires overriding the generation loop to pass cond_tokens to each forward call
+        
+        # Store condition tokens for use in forward calls during generation
+        if hasattr(self, 'transformer') and hasattr(self.transformer, '_current_cond_tokens'):
+            self.transformer._current_cond_tokens = cond_tokens
+            self.transformer._current_cond_attention_mask = cond_attention_mask
+        
+        generated_sequences = self.generate(
+            input_ids=input_ids,
+            **gen_kwargs,
+        )
+        
+        # Clear condition tokens after generation
+        if hasattr(self, 'transformer') and hasattr(self.transformer, '_current_cond_tokens'):
+            self.transformer._current_cond_tokens = None
+            self.transformer._current_cond_attention_mask = None
+        
+        # Handle prefix_safe case: return full SAFE string and generated span
+        if prefix_safe is not None:
+            # Decode the full generated sequences
+            full_safe_strings = tokenizer.batch_decode(generated_sequences, skip_special_tokens=True)
+            
+            # Extract only the newly generated part (after the prefix)
+            prefix_length = input_ids.size(1)
+            generated_span_sequences = generated_sequences[:, prefix_length:]
+            generated_span_strings = tokenizer.batch_decode(generated_span_sequences, skip_special_tokens=True)
+            
+            return {
+                'full_safe': full_safe_strings,
+                'generated_span': generated_span_strings,
+                'sequences': generated_sequences
+            }
+        else:
+            return generated_sequences

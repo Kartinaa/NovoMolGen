@@ -51,6 +51,7 @@ def run_tokenize(cfg: DictConfig) -> None:
     # build and save
     print(f"Tokenising {dm.dataset_name} and writing to {cache_dir} …")
     dm.create_tokenized_datasets()
+    # TODO: Maybe a bug here, `train_dataset` is not defined in `create_tokenized_datasets()`, see what happens.
     print(f"Done.  Train={len(dm.train_dataset)}  |  "
           f"Eval={dm.eval_dataset and len(dm.eval_dataset) or 0}")
 
@@ -191,7 +192,7 @@ class EntryPoint:
         config_dir: str = "../configs/dataset",
         **overrides,
     ):
-        cfg = _load_cfg(config_name, config_dir, **overrides)
+        cfg = _load_cfg(config_name, config_dir, **overrides) # Will be loaded as `DictConfig`
         run_tokenize(cfg)
 
 if __name__ == "__main__":

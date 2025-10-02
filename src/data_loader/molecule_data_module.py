@@ -3,6 +3,7 @@ import warnings
 import json
 from pathlib import Path
 from typing import Union, Optional, List
+import torch
 
 import rootutils
 import safe
@@ -32,6 +33,10 @@ class MolDataModule:
         streaming: bool = False,
         validation_set_names: Optional[Union[str, List[str]]] = None,
         filter_validation_set: bool = False,
+        # Extra conditioning options for collator
+        include_condition_features: bool = False,  # Include pocket_vec, evo_vec, ifp, ligand_vec
+        latent_dim: int = 128,
+        device: Optional[Union[str, "torch.device"]] = None,
     ):
         """
         Args:
@@ -56,14 +61,22 @@ class MolDataModule:
         self.num_invalid = 0
         self.validation_set_names = validation_set_names
         self.filter_validation_set = filter_validation_set
+        self.include_condition_features = include_condition_features
+        self.latent_dim = latent_dim
+        # Collator returns CPU tensors by default; allow override
+        try:
+            import torch as _torch
+            self.device = _torch.device(device) if device is not None else _torch.device("cpu")
+        except Exception:
+            self.device = None
 
         _tok_name = (
             Path(tokenizer_name).name
             if tokenizer_name is not None
-            else Path(tokenizer_path).name
+            else Path(tokenizer_path).name # it will return the basename of the tokenizer path.
         )
-        _dat_name = Path(dataset_name).name
-        _tok_name = _tok_name.replace(f"_{_dat_name}", "").replace(".json", "")
+        _dat_name = Path(dataset_name).name # return basename again
+        _tok_name = _tok_name.replace(f"_{_dat_name}", "").replace(".json", "") # remove .json
         _dat_path = self.get_cache_dir(dataset_name)
         self.save_directory = os.path.join(
             HF_CACHE_HOME, "datasets", _dat_path, f"tokenized_{_tok_name}"
@@ -75,13 +88,19 @@ class MolDataModule:
         # To get rid of fast tokenizer warning, from: https://github.com/huggingface/transformers/issues/22638#issuecomment-1560406455
         self.tokenizer.deprecation_warnings["Asking-to-pad-a-fast-tokenizer"] = True
 
+        ### Prepare batches of tokenized data for language model training, `mlm=False` means 
+        ### no masked language modeling (causal language modeling).
         self.data_collator = DataCollatorForLanguageModeling(
             tokenizer=self.tokenizer, mlm=False
         )
 
+        # Wrap with custom collate_fn to optionally add extra fields
+        self.collate_fn = self._build_collate_fn()
+
         if validation_set_names is None:
             self.eval_dataset = None
             self.valid_set = set([])
+        ### Don't understand this part, why validation set has split "train"?
         elif isinstance(validation_set_names, str):
             self.eval_dataset = load_dataset(
                 validation_set_names, split="train", num_proc=num_proc
@@ -92,6 +111,8 @@ class MolDataModule:
         else:
             self.eval_dataset = {}
             for name in validation_set_names:
+                ### `load_dataset()` is very flexible, which can load dataset from local directory 
+                ### or from Hugging Face Hub.
                 self.eval_dataset[Path(name).name] = load_dataset(
                     name, split="train", num_proc=num_proc
                 )
@@ -103,6 +124,100 @@ class MolDataModule:
 
         self.prepare_eval_dataset()
         self.train_dataset = None
+
+    def _build_collate_fn(self):
+        """Wrap Hugging Face LM collator to optionally attach protein inputs and posterior params.
+
+        Returns a function that takes a list[dict] and returns a dict of tensors on the configured device.
+        """
+        import torch
+
+        base_collator = self.data_collator
+        include_cond_features = self.include_condition_features
+        target_device = self.device if self.device is not None else torch.device("cpu")
+
+        def _collate(features: List[dict]):
+            batch = base_collator(features)
+            # Ensure expected dtypes
+            if "input_ids" in batch:
+                batch["input_ids"] = batch["input_ids"].to(target_device)
+            if "attention_mask" in batch:
+                # keep original int64 mask from collator; model may cast as needed
+                batch["attention_mask"] = batch["attention_mask"].to(target_device)
+            if "labels" in batch:
+                batch["labels"] = batch["labels"].to(target_device)
+
+            B = batch["input_ids"].size(0) if "input_ids" in batch else len(features)
+
+            if include_cond_features:
+                # Check if condition features are already in the dataset
+                if all(key in features[0] for key in ["pocket_vec", "evo_vec", "ifp", "ligand_vec"]):
+                    # Load real condition features from dataset
+                    batch["pocket_vec"] = torch.stack([torch.tensor(f["pocket_vec"], dtype=torch.float32) for f in features]).to(target_device)
+                    batch["evo_vec"] = torch.stack([torch.tensor(f["evo_vec"], dtype=torch.float32) for f in features]).to(target_device)
+                    batch["ifp"] = torch.stack([torch.tensor(f["ifp"], dtype=torch.float32) for f in features]).to(target_device)
+                    batch["ligand_vec"] = torch.stack([torch.tensor(f["ligand_vec"], dtype=torch.float32) for f in features]).to(target_device)
+                else:
+                    # Fallback: use random initialization if features not in dataset
+                    print("Warning: Condition features not found in dataset, using random initialization")
+                    batch["pocket_vec"] = torch.randn(B, 512, dtype=torch.float32, device=target_device)  # Uni-Mol pocket embedding
+                    batch["evo_vec"] = torch.randn(B, 1280, dtype=torch.float32, device=target_device)    # ESM-2 evolutionary embedding
+                    batch["ifp"] = torch.randn(B, 16384, dtype=torch.float32, device=target_device)      # Interaction fingerprint
+                    batch["ligand_vec"] = torch.randn(B, 1536, dtype=torch.float32, device=target_device) # Ligand molecular representation
+
+            return batch
+
+        return _collate
+
+    @staticmethod
+    def make_dummy_batch(
+        batch_size: int = 2,
+        seq_len: int = 8,
+        vocab_size: int = 100,
+        include_condition_features: bool = False,
+        device: Optional[Union[str, "torch.device"]] = "cuda",
+        condition_data: Optional[dict] = None,
+    ) -> dict:
+        """Create a dummy batch for unit tests with optional extra fields.
+
+        Args:
+            batch_size: Number of samples in batch
+            seq_len: Sequence length
+            vocab_size: Vocabulary size
+            include_condition_features: Whether to include condition features
+            device: Target device
+            condition_data: Optional dict with real condition data keys:
+                - "pocket_vec": List of pocket vectors [batch_size, 512]
+                - "evo_vec": List of evolutionary vectors [batch_size, 1280] 
+                - "ifp": List of interaction fingerprints [batch_size, 16384]
+                - "ligand_vec": List of ligand vectors [batch_size, 1536]
+
+        Returns a dict with keys compatible with the model forward.
+        """
+        import torch
+
+        dev = torch.device(device) if device is not None else torch.device("cpu")
+        input_ids = torch.randint(0, vocab_size, (batch_size, seq_len), dtype=torch.long, device=dev)
+        attention_mask = torch.ones(batch_size, seq_len, dtype=torch.long, device=dev)
+        labels = input_ids.clone()
+
+        batch = {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
+
+        if include_condition_features:
+            if condition_data is not None and all(key in condition_data for key in ["pocket_vec", "evo_vec", "ifp", "ligand_vec"]):
+                # Use real condition data if provided
+                batch["pocket_vec"] = torch.tensor(condition_data["pocket_vec"], dtype=torch.float32, device=dev)
+                batch["evo_vec"] = torch.tensor(condition_data["evo_vec"], dtype=torch.float32, device=dev)
+                batch["ifp"] = torch.tensor(condition_data["ifp"], dtype=torch.float32, device=dev)
+                batch["ligand_vec"] = torch.tensor(condition_data["ligand_vec"], dtype=torch.float32, device=dev)
+            else:
+                # Fallback: Add random condition feature vectors for testing
+                batch["pocket_vec"] = torch.randn(batch_size, 512, dtype=torch.float32, device=dev)
+                batch["evo_vec"] = torch.randn(batch_size, 1280, dtype=torch.float32, device=dev)
+                batch["ifp"] = torch.randn(batch_size, 16384, dtype=torch.float32, device=dev)
+                batch["ligand_vec"] = torch.randn(batch_size, 1536, dtype=torch.float32, device=dev)
+
+        return batch
 
     @staticmethod
     def get_cache_dir(dataset_name):
@@ -218,10 +333,13 @@ class MolDataModule:
         # Load dataset
         dataset = load_dataset(self.dataset_name, num_proc=self.num_proc, split="train")
         column_names = list(dataset.features)
+        ### Check if Molecular type conversion needed.
         if self.mol_type not in column_names:
             column_names += [self.mol_type]
             # change mol_type to self.mol_type in dataset
             print("change mol_type from to", self.mol_type)
+            ### `map()` is used to apply the first function (`transfer_mol_type()` in this case) 
+            ### to each element of the dataset.
             dataset = dataset.map(
                 self.transfer_mol_type,
                 batched=False,

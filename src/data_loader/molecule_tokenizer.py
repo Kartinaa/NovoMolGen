@@ -84,7 +84,7 @@ class MoleculeTokenizer(SAFETokenizer):
             raise ValueError(f"Invalid tokenizer type {tokenizer_type}")
 
         self.tokenizer = Tokenizer(self.model)
-        self.tokenizer = self.set_special_tokens(self.tokenizer)
+        self.tokenizer = self.set_special_tokens(self.tokenizer) # Use loaded tokenizer 
         if splitter == "atomwise":
             self.tokenizer.pre_tokenizer = Split(
                 Regex(
@@ -184,11 +184,11 @@ class MoleculeTokenizer(SAFETokenizer):
         """Load a tokenizer from a file.
 
         :param file_name: File name to load the tokenizer from
-        :return: Tokenizer
+        :return: MoleculeTokenizer instance
         """
         tokenizer = Tokenizer.from_file(file_name)
         mol_tokenizer = cls("bpe")
-        mol_tokenizer.tokenizer = mol_tokenizer.set_special_tokens(tokenizer)
+        mol_tokenizer.tokenizer = mol_tokenizer.set_special_tokens(tokenizer) # Use loaded tokenizer to overwrite initialized one
         mol_tokenizer.tokenizer.post_processor = TemplateProcessing(
             single="<bos> $A <eos>",
             special_tokens=[
@@ -196,7 +196,7 @@ class MoleculeTokenizer(SAFETokenizer):
                 ("<eos>", mol_tokenizer.eos_token_id),
             ],
         )  # type: ignore
-        return mol_tokenizer
+        return mol_tokenizer # Return MoleculeTokenizer instance
 
     def get_pretrained(self, **kwargs) -> PreTrainedTokenizerFast:
         r"""Get a pretrained tokenizer from this tokenizer.

@@ -261,7 +261,7 @@ _FINETUNE_REGISTRY: Dict[
     "AugmentedHC": (AugmentedHCConfig, AugmentedHCTrainer),
 }
 
-
+### What we could also use:
 def _prepare_base_model(config: DictConfig) -> Tuple[NovoMolGen, Any]:
     """Load checkpoint or fresh model + tokenizer."""
     tokenizer = MoleculeTokenizer.load(
