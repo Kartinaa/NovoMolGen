@@ -21,6 +21,7 @@ from transformers.utils import (
 from transformers.modeling_utils import unwrap_model, logger
 from functools import partial
 from safetensors.torch import load_file as safe_load_file
+from typing import Iterable
 
 try:
     from flash_attn.models.gpt import GPTLMHeadModel
@@ -219,6 +220,13 @@ class NovoMolGenConfig(LlamaConfig):
                  enable_cross_attn: bool = False,
                  cross_layers: Optional[List[int]] = None,
                  cond_tokens_len: int = 128,
+                 # Finetune / LoRA controls
+                 train_new_modules_only: bool = True,
+                 enable_lora: bool = False,
+                 lora_r: int = 16,
+                 lora_alpha: int = 32,
+                 lora_dropout: float = 0.05,
+                 lora_target_modules: Optional[List[str]] = None,
                  **kwargs
                  ):
         super().__init__(**kwargs)
@@ -232,6 +240,14 @@ class NovoMolGenConfig(LlamaConfig):
         self.enable_cross_attn = enable_cross_attn
         self.cross_layers = cross_layers if cross_layers is not None else []
         self.cond_tokens_len = int(cond_tokens_len)
+        # Finetune / LoRA controls (defaults are safe no-op unless toggled)
+        self.train_new_modules_only = bool(train_new_modules_only)
+        self.enable_lora = bool(enable_lora)
+        self.lora_r = int(lora_r)
+        self.lora_alpha = int(lora_alpha)
+        self.lora_dropout = float(lora_dropout)
+        # If None, we will auto-detect at runtime
+        self.lora_target_modules = lora_target_modules or []
         self.auto_map = {"AutoModelForCausalLM": "modeling_novomolgen.NovoMolGen"}
 
     @classmethod
@@ -472,6 +488,146 @@ class NovoMolGen(GPTLMHeadModel):
                 use_cross_attn=True,
             )
 
+        # Finetune controls: optionally freeze base; LoRA applied externally
+        self._maybe_setup_finetune_freeze_only()
+
+    # ------------------------
+    # Finetune & LoRA utilities
+    # ------------------------
+    def _iter_new_modules(self) -> Iterable[nn.Module]:
+        """
+        Return only the set of newly added modules to train:
+        - If cross-attn is disabled: train only encoders/fusion/cond_proj
+        - If cross-attn is enabled: train only cross_adapters/gates (keep the rest of the
+          transformer frozen), plus encoders/fusion/cond_proj
+        """
+        # Encoders, fusion, and cond_proj are always considered "new modules"
+        for m in [getattr(self, 'ligand_encoder', None),
+                  getattr(self, 'protein_encoder', None),
+                  getattr(self, 'condition_fusion', None)]:
+            if m is not None:
+                yield m
+        if hasattr(self, 'cond_proj'):
+            yield self.cond_proj
+
+        # For cross-attn: return only adapters/gates, not the entire transformer
+        if getattr(self.base_config, 'enable_cross_attn', False) \
+           and hasattr(self, 'transformer') \
+           and isinstance(self.transformer, CrossAttentionTransformer):
+
+            # cross_adapters is a ModuleDict; yield it so its parameters are unfrozen
+            if hasattr(self.transformer, 'cross_adapters') and self.transformer.cross_adapters is not None:
+                yield self.transformer.cross_adapters
+
+            # gates is a ParameterDict (no .modules()), but named_parameters() works.
+            # Wrap it with a lightweight module so .parameters() can iterate them uniformly.
+            class _GateWrapper(nn.Module):
+                def __init__(self, pd: nn.ParameterDict):
+                    super().__init__()
+                    # Register parameters directly so .parameters() can see them
+                    for k, v in pd.items():
+                        self.register_parameter(k, v)
+            if hasattr(self.transformer, 'gates') and self.transformer.gates is not None:
+                yield _GateWrapper(self.transformer.gates)
+
+    def _freeze_all_parameters(self):
+        for p in self.parameters():
+            p.requires_grad = False
+
+    def _unfreeze_new_modules(self):
+        for module in self._iter_new_modules():
+            for p in module.parameters():
+                p.requires_grad = True
+
+    def _maybe_setup_finetune_freeze_only(self):
+        """
+        If base_config.train_new_modules_only is True (default),
+        freeze all parameters, then unfreeze only new modules
+        (adapters/gates + encoders/fusion/cond_proj).
+        """
+        if getattr(self.base_config, 'train_new_modules_only', True):
+            self._freeze_all_parameters()
+            self._unfreeze_new_modules()
+
+    def _param_belongs_to_new_module(self, param_name: str) -> bool:
+        """
+        Check by name whether a parameter belongs to new modules. Match only:
+          - transformer.cross_adapters.*
+          - transformer.gates.*
+          - ligand_encoder.*, protein_encoder.*, condition_fusion.*, cond_proj.*
+        """
+        prefixes = [
+            'transformer.cross_adapters',
+            'transformer.gates',
+            'ligand_encoder',
+            'protein_encoder',
+            'condition_fusion',
+            'cond_proj',
+        ]
+        return any(param_name.startswith(pf) for pf in prefixes)
+
+    def autodetect_lora_targets(self) -> List[str]:
+        """
+        Auto-detect common linear layer short-names for LoRA injection; keep original logic.
+        """
+        common_names = [
+            'Wqkv', 'out_proj',
+            'q_proj', 'k_proj', 'v_proj', 'o_proj',
+            'Wq', 'Wk', 'Wv', 'Wo',
+            'qkv_proj'
+        ]
+        present: List[str] = []
+        for name, module in self.named_modules():
+            # only consider leaf linear layers
+            if isinstance(module, nn.Linear):
+                short = name.split('.')[-1]
+                if short in common_names and short not in present:
+                    present.append(short)
+        # Fallback to safe defaults if nothing found
+        if not present:
+            present = ['Wqkv', 'out_proj']
+        return present
+
+    def print_trainable_summary(self, max_lines: int = 30):
+        """
+        Print a concise summary of trainable parameters to verify that only
+        adapters/gates + encoders/fusion/cond_proj are being trained.
+        """
+        total = sum(1 for _ in self.parameters())
+        trainable = [(n, p.numel()) for n, p in self.named_parameters() if p.requires_grad]
+        tot_train = sum(x[1] for x in trainable)
+        print(f"[trainable] tensors: {len(trainable)} / {total}, params: {tot_train:,}")
+        head = trainable[:max_lines]
+        for n, k in head:
+            print("  +", n, f"({k})")
+        if len(trainable) > max_lines:
+            print(f"  ... and {len(trainable) - max_lines} more")
+    
+    def debug_new_modules(self):
+        """Debug method to check which modules are considered 'new'."""
+        print("=== Debug: New Modules ===")
+        print("Modules returned by _iter_new_modules():")
+        for i, module in enumerate(self._iter_new_modules()):
+            print(f"  {i+1}. {type(module).__name__}: {module}")
+            if hasattr(module, 'parameters'):
+                param_count = sum(p.numel() for p in module.parameters())
+                trainable_count = sum(p.numel() for p in module.parameters() if p.requires_grad)
+                print(f"     Total params: {param_count:,}, Trainable: {trainable_count:,}")
+        
+        print("\nAll modules with 'encoder' in name:")
+        for name, module in self.named_modules():
+            if 'encoder' in name.lower():
+                param_count = sum(p.numel() for p in module.parameters())
+                trainable_count = sum(p.numel() for p in module.parameters() if p.requires_grad)
+                print(f"  {name}: {param_count:,} total, {trainable_count:,} trainable")
+        
+        print("\nAll modules with 'fusion' in name:")
+        for name, module in self.named_modules():
+            if 'fusion' in name.lower():
+                param_count = sum(p.numel() for p in module.parameters())
+                trainable_count = sum(p.numel() for p in module.parameters() if p.requires_grad)
+                print(f"  {name}: {param_count:,} total, {trainable_count:,} trainable")
+
     # TODO: here we ignore attention_mask to make it compatible with HF trainer. The MHA in flash-attention should
     #  be reimplement and integrate attention_mask like here:
     #  https://github.com/huggingface/transformers/blob/0864dd3beb238b7bec3528a3d1d6c17a28f51a51/src/transformers/models/llama/modeling_llama.py#L536
@@ -681,7 +837,9 @@ class NovoMolGen(GPTLMHeadModel):
                 state_dict = torch.load(os.path.join(pretrained_model_name_or_path, checkpoint_path, WEIGHTS_NAME))
         else:
             state_dict = state_dict_from_pretrained(pretrained_model_name_or_path, checkpoint_path=checkpoint_path, **kwargs)
-        model.load_state_dict(state_dict)
+
+        model.load_state_dict(state_dict, strict=False)
+
         return model
 
     def sample(
@@ -880,6 +1038,7 @@ class NovoMolGen(GPTLMHeadModel):
             self.transformer._current_cond_tokens = cond_tokens
             self.transformer._current_cond_attention_mask = cond_attention_mask
         
+        # Don't pass cond_tokens/cond_attention_mask to base generate() - flash-attn doesn't support them
         generated_sequences = self.generate(
             input_ids=input_ids,
             **gen_kwargs,

@@ -16,8 +16,8 @@ rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 class HFTrainingArguments(TrainingArguments):
     def __init__(self,
                  output_dir: str = './save',
-                 data_seed: int = 42,
-                 seed: int = 42,
+                 data_seed: int = 2025,
+                 seed: int = 2025,
                  hub_token: str = None,
                  run_name: str = 'test',
                  report_to=None,
@@ -26,9 +26,11 @@ class HFTrainingArguments(TrainingArguments):
                  repo_id: str = 'MolGen',
                  total_batch_size: int = None,
                  **kwargs):
-        super().__init__(output_dir=output_dir, data_seed=data_seed, seed=seed,
+        super().__init__(output_dir=output_dir, seed=seed,
                          logging_dir=output_dir, run_name=run_name, hub_token=hub_token,
                          report_to=report_to, **kwargs)
+        # Store data_seed as a custom attribute instead of passing to parent
+        self.data_seed = data_seed
         self.save_spec_steps = save_spec_steps
         self.push_spec_checkpoints = push_spec_checkpoints
         self.repo_id = repo_id

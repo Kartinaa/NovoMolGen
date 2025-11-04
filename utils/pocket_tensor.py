@@ -15,6 +15,10 @@ def load_mol_repr_tensor(pkl_path: str) -> torch.Tensor:
         size = batch.get("bsz", 0)
         for i in range(size):
             mol_repr_list.append(batch["mol_repr_cls"][i])
-    return torch.tensor(mol_repr_list, dtype=torch.float32)
+    
+    # Convert to numpy array first, then to tensor (more efficient)
+    import numpy as np
+    mol_repr_array = np.array(mol_repr_list, dtype=np.float32)
+    return torch.from_numpy(mol_repr_array).squeeze(0)
 
 

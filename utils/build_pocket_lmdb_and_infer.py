@@ -214,7 +214,10 @@ def run_unimol_pocket_infer(data_dir: str, job_name: str, dict_file: str, weight
     if os.path.abspath(dict_file) != os.path.abspath(dst_dict_path):
         subprocess.run(["/usr/bin/bash", "-lc", f"cp '{dict_file}' '{dst_dict_path}'"], check=True)
 
+    # Change to Uni-Mol directory and run from there (like in the notebook)
+    unimol_dir = "/home/yang2531/Documents/Softwares/Uni-Mol/unimol"
     cmd = (
+        f"cd {unimol_dir} && "
         f"python unimol/infer.py --user-dir unimol {data_dir} --valid-subset {job_name} "
         f"--results-path {results_dir} --num-workers {num_workers} --ddp-backend=c10d --batch-size {batch_size} "
         f"--task unimol_pocket --loss unimol_infer --arch unimol_base --path {weights} "

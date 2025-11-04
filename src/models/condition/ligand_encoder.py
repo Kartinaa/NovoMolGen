@@ -18,8 +18,8 @@ class LigandConditionEncoder(nn.Module):
     """Two-tower encoder + early-fusion head producing VAE posterior parameters.
 
     Architecture:
-      - IFP tower (aggressive): 16384 -> 4096 -> 1024 -> d_embed
-      - MOL tower (light):      1536  -> 1024 -> d_embed
+      - IFP tower (reduced): 16384 -> 2048 -> 512 -> d_embed
+      - MOL tower (light):   1536  -> 512  -> d_embed
       - Early fusion with concat([a, b, a*b, |a-b|]) then small MLP to d_embed
         plus a gated residual skip from a linear projection of the fused vector.
       - Heads produce mu and rho; sigma = softplus(rho) + eps_sigma.
@@ -54,31 +54,32 @@ class LigandConditionEncoder(nn.Module):
         self.eps_sigma = eps_sigma
         self.use_layernorm = use_layernorm
 
-        # IFP tower: 16384 -> 4096 -> 1024 -> d_embed
-        self.ifp_fc1 = nn.Linear(d_ifp, 4096)
-        self.ifp_fc2 = nn.Linear(4096, 1024)
-        self.ifp_fc3 = nn.Linear(1024, d_embed)
+        # IFP tower: 16384 -> 2048 -> 512 -> d_embed (reduced from 4096->1024)
+        self.ifp_fc1 = nn.Linear(d_ifp, 512)
+        self.ifp_fc2 = nn.Linear(512, 512)
+        self.ifp_fc3 = nn.Linear(512, d_embed)
         self.ifp_drop1 = nn.Dropout(dropout)
         self.ifp_drop2 = nn.Dropout(dropout)
         self.ifp_drop3 = nn.Dropout(dropout)
         if use_layernorm:
-            self.ifp_ln1 = nn.LayerNorm(4096)
-            self.ifp_ln2 = nn.LayerNorm(1024)
+            self.ifp_ln1 = nn.LayerNorm(512)
+            self.ifp_ln2 = nn.LayerNorm(512)
             self.ifp_ln3 = nn.LayerNorm(d_embed)
 
-        # MOL tower: 1536 -> 1024 -> d_embed
-        self.mol_fc1 = nn.Linear(d_mol, 1024)
-        self.mol_fc2 = nn.Linear(1024, d_embed)
+        # MOL tower: 1536 -> 512 -> d_embed (reduced from 1024)
+        self.mol_fc1 = nn.Linear(d_mol, 512)
+        self.mol_fc2 = nn.Linear(512, d_embed)
         self.mol_drop1 = nn.Dropout(dropout)
         self.mol_drop2 = nn.Dropout(dropout)
         if use_layernorm:
-            self.mol_ln1 = nn.LayerNorm(1024)
+            self.mol_ln1 = nn.LayerNorm(512)
             self.mol_ln2 = nn.LayerNorm(d_embed)
 
         # Early fusion: concat(a, b, a*b, |a-b|) => 4*d_embed
         self.fuse_in = 4 * d_embed
-        self.fuse_fc1 = nn.Linear(self.fuse_in, hidden_fuse)
-        self.fuse_fc2 = nn.Linear(hidden_fuse, d_embed)
+        # Reduce fusion hidden size for efficiency
+        self.fuse_fc1 = nn.Linear(self.fuse_in, min(hidden_fuse, 512))
+        self.fuse_fc2 = nn.Linear(min(hidden_fuse, 512), d_embed)
         self.fuse_drop = nn.Dropout(dropout)
 
         # Cheap skip projection and learnable gate

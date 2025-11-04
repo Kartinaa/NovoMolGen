@@ -19,15 +19,15 @@ def calc_smi_representation(smi_list: list[str]) -> torch.Tensor:
                  )
     
     unimol_repr = clf.get_repr(smi_list, return_atomic_reprs=True)
-    return torch.tensor(unimol_repr['atomic_reprs'])
+    return torch.tensor(unimol_repr['cls_repr']).squeeze(0)
 
 
 def calc_ifp_plec(prot_path: str, lig_path: str) -> torch.Tensor:
     try:
-        protein=next(od.toolkits.readfile('pdb', prot_path))
+        protein=next(od.toolkit.readfile('pdb', prot_path))
         protein.protein=True
         
-        ligand=next(od.toolkits.readfile('sdf', lig_path))
+        ligand=next(od.toolkit.readfile('sdf', lig_path))
         
         ifp = od.fingerprints.PLEC(
             protein,ligand,
@@ -40,7 +40,7 @@ def calc_ifp_plec(prot_path: str, lig_path: str) -> torch.Tensor:
             ignore_hoh     = True,
         )
         
-        return torch.tensor(ifp, dtype=torch.float32).unsqueeze(0)
+        return torch.tensor(ifp, dtype=torch.float32)
     except Exception as e:
         return f"{prot_path} or {lig_path}: {e}"
     

@@ -8,7 +8,7 @@ do_eval: true
 do_train: true
 evaluation_strategy: "steps"
 eval_steps: 1000
-gradient_accumulation_steps: 1
+gradient_accumulation_steps: 2
 gradient_checkpointing: false
 learning_rate: 6e-4
 log_on_each_node: false
@@ -19,8 +19,8 @@ max_steps: 77380
 optim: "adamw_torch"
 adam_beta1: 0.9
 adam_beta2: 0.95
-per_device_eval_batch_size: 4800
-per_device_train_batch_size: 4800
+per_device_eval_batch_size: 400
+per_device_train_batch_size: 400
 save_steps: 1000
 save_strategy: "steps"
 save_total_limit: 3
@@ -34,4 +34,4 @@ save_safetensors: false
 hub_private_repo: true
 include_num_input_tokens_seen: true
 deepspeed: './configs/trainer/deepspeed_stage_zero_2.json'
-total_batch_size: 19200
+total_batch_size: 800

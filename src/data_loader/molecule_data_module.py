@@ -300,6 +300,7 @@ class MolDataModule:
         elif target_mol_type == "SAFE":
             try:
                 # TODO: check if ignore_stereo is needed
+                ### YB: It is needed.
                 converted = safe.encode(element["SMILES"], ignore_stereo=True)
             except Exception as e:
                 warnings.simplefilter("ignore")
@@ -485,7 +486,10 @@ class MolDataModule:
         Returns:
             Dataset: Prepared tokenized evaluation dataset.
         """
-        if type(self.eval_dataset) is dict:
+        if self.eval_dataset is None:
+            # No evaluation dataset provided
+            return
+        elif type(self.eval_dataset) is dict:
             for key, val_dataset in self.eval_dataset.items():
                 self.eval_dataset[key] = self._prepare_valid_set(val_dataset)
         else:

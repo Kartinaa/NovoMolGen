@@ -8,6 +8,7 @@ __pycache__/
 
 # Distribution / packaging
 .Python
+finetune_data/
 build/
 wandb/
 outputs/
@@ -157,6 +158,9 @@ dmypy.json
 *.h5py
 *.tar
 *.tar.gz
+*.safetensors
+*.bin
+models/
 
 # Lightning-Hydra-Template
 configs/local/default.yaml
@@ -180,3 +184,16 @@ configs/local/default.yaml
 /tmp/
 ./configs/tmp_*
 /configs/tmp_*
+
+# Large data files
+*.smi
+extracted_ligands.smi
+cache/
+logs/
+*.pdbqt
+
+# Notebook outputs
+*.ipynb_checkpoints
+
+# Cursor
+.cursorignore
