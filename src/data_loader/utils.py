@@ -22,7 +22,18 @@ def safe_to_smiles(safe_str: str) -> str:
     except Exception as e:
         print(f"Error decoding SAFE string {safe_str}: {e}")
         return ""
+    
+def safe_to_smiles_filtered(safe_str: str) -> str:
+    """Converts a SMILES string to a SAFE string.
 
+    :param safe_str: SAFE string to convert
+    :return: SMILES string
+    """
+    try:
+        return safe.decode(safe_str)
+    except Exception as e:
+        print(f"Error decoding SAFE string {safe_str}: {e}")
+        return ""
 
 def selfies_to_smiles(selfies: str) -> str | Any:
     """Converts a SELFIES string to a SMILES string.

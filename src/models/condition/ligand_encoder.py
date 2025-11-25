@@ -8,6 +8,7 @@ returns logvar for KL computation compatibility.
 """
 
 from typing import Tuple, Optional
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -33,6 +34,7 @@ class LigandConditionEncoder(nn.Module):
       use_layernorm: bool, whether to apply LayerNorm after each block
       hidden_fuse: int, hidden size in fusion MLP
       eps_sigma: float, epsilon added to softplus for positivity
+      ligand_vec_stats_path: Optional[str], path to ligand statistics file (.pt) for normalization
     """
 
     def __init__(
@@ -45,6 +47,7 @@ class LigandConditionEncoder(nn.Module):
         use_layernorm: bool = True,
         hidden_fuse: int = 1024,
         eps_sigma: float = 1e-5,
+        ligand_vec_stats_path: Optional[str] = None,
     ) -> None:
         super().__init__()
         self.d_ifp = d_ifp
@@ -53,8 +56,13 @@ class LigandConditionEncoder(nn.Module):
         self.z_dim = z_dim
         self.eps_sigma = eps_sigma
         self.use_layernorm = use_layernorm
+        
+        # Load ligand statistics for normalization if provided
+        self.normalize_ligand_vec = False
+        if ligand_vec_stats_path is not None:
+            self._load_ligand_vec_stats(ligand_vec_stats_path)
 
-        # IFP tower: 16384 -> 2048 -> 512 -> d_embed (reduced from 4096->1024)
+        # IFP tower: 16384 -> 512 -> d_embed (reduced from 4096->1024)
         self.ifp_fc1 = nn.Linear(d_ifp, 512)
         self.ifp_fc2 = nn.Linear(512, 512)
         self.ifp_fc3 = nn.Linear(512, d_embed)
@@ -98,6 +106,60 @@ class LigandConditionEncoder(nn.Module):
             nn.init.xavier_uniform_(layer.weight)
             if layer.bias is not None:
                 nn.init.zeros_(layer.bias)
+    
+    def _load_ligand_vec_stats(self, stats_path: str) -> None:
+        """加载ligand统计量用于归一化。
+        
+        Args:
+            stats_path: 统计量文件路径（.pt文件，包含'mu'和'sigma'键）
+        """
+        stats_path = Path(stats_path)
+        if not stats_path.exists():
+            raise FileNotFoundError(f"ligand_vec statistics file not found: {stats_path}")
+        
+        try:
+            stats = torch.load(stats_path, map_location='cpu')
+            
+            # 提取mu和sigma
+            if isinstance(stats, dict):
+                mu = stats.get('mu', None)
+                sigma = stats.get('sigma', None)
+                
+                if mu is None or sigma is None:
+                    raise ValueError(
+                        f"Statistics file must contain 'mu' and 'sigma' keys. "
+                        f"Found keys: {list(stats.keys())}"
+                    )
+            else:
+                raise ValueError(f"Expected dictionary in stats file, got {type(stats)}")
+            
+            # 验证维度
+            if mu.dim() != 1 or sigma.dim() != 1:
+                raise ValueError(
+                    f"mu and sigma must be 1D tensors. Got mu: {mu.shape}, sigma: {sigma.shape}"
+                )
+            
+            if mu.shape[0] != self.d_mol:
+                raise ValueError(
+                    f"Dimension mismatch: mu has {mu.shape[0]} dims, but d_mol={self.d_mol}"
+                )
+            
+            if sigma.shape[0] != self.d_mol:
+                raise ValueError(
+                    f"Dimension mismatch: sigma has {sigma.shape[0]} dims, but d_mol={self.d_mol}"
+                )
+            
+            # 注册为buffer（不参与训练，但会包含在state_dict中）
+            self.register_buffer('ligand_vec_mu', mu.float())
+            self.register_buffer('ligand_vec_sigma', sigma.float())
+            self.normalize_ligand_vec = True
+            
+            print(f"✓ Loaded ligand_vec statistics from {stats_path}")
+            print(f"  mu: shape={self.ligand_vec_mu.shape}, mean={self.ligand_vec_mu.mean().item():.6f}")
+            print(f"  sigma: shape={self.ligand_vec_sigma.shape}, mean={self.ligand_vec_sigma.mean().item():.6f}")
+            
+        except Exception as e:
+            raise RuntimeError(f"Failed to load ligand_vec statistics from {stats_path}: {e}")
 
     def _encode_ifp_tower(self, x: torch.Tensor) -> torch.Tensor:
         h = x
@@ -124,7 +186,24 @@ class LigandConditionEncoder(nn.Module):
         return h
 
     def _encode_mol_tower(self, x: torch.Tensor) -> torch.Tensor:
+        """Encode molecule tower with optional Z-score normalization.
+        
+        Args:
+            x: [B, d_mol] input tensor
+            
+        Returns:
+            [B, d_embed] encoded tensor
+        """
         h = x
+        
+        # Z-score normalization if statistics are loaded
+        if self.normalize_ligand_vec:
+            # Normalize: (x - mu) / sigma
+            # Add small epsilon to sigma to avoid division by zero
+            eps = 1e-8
+            sigma_safe = self.ligand_vec_sigma + eps
+            h = (h - self.ligand_vec_mu) / sigma_safe
+        
         h = self.mol_fc1(h)
         h = F.gelu(h)
         h = self.mol_drop1(h)
@@ -214,6 +293,7 @@ def create_ligand_encoder(
     d_mol: int = 1536,
     d_embed: int = 512,
     z_dim: Optional[int] = None,
+    ligand_vec_stats_path: Optional[str] = None,
     **kwargs,
 ) -> LigandConditionEncoder:
     """Factory with backward-compat args.
@@ -221,6 +301,7 @@ def create_ligand_encoder(
     - If latent_dim provided, map to z_dim.
     - ligand_input_dim is ignored in two-tower setup but accepted for compatibility.
     - hidden_dim maps to hidden_fuse; towers are fixed as specified.
+    - ligand_vec_stats_path: optional path to ligand statistics for normalization.
     """
     if z_dim is None and latent_dim is not None:
         z_dim = latent_dim
@@ -234,6 +315,7 @@ def create_ligand_encoder(
         dropout=dropout,
         use_layernorm=True,
         hidden_fuse=hidden_dim,
+        ligand_vec_stats_path=ligand_vec_stats_path,
     )
 
 

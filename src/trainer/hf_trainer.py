@@ -1,5 +1,6 @@
 from transformers.trainer import *
 from transformers.trainer import _is_peft_model
+from transformers.integrations import get_reporting_integration_callbacks
 import signal
 import rootutils
 import torch
@@ -114,7 +115,9 @@ class HFTrainer(Trainer):
                  **kwargs
                  ):
         super().__init__(**kwargs)
-        default_callbacks = DEFAULT_CALLBACKS  # + get_reporting_integration_callbacks(self.args.report_to)
+        # Get reporting integration callbacks (W&B, TensorBoard, etc.) based on report_to
+        reporting_callbacks = get_reporting_integration_callbacks(self.args.report_to)
+        default_callbacks = DEFAULT_CALLBACKS + reporting_callbacks
         callbacks = default_callbacks if callbacks is None else default_callbacks + callbacks
         self.callback_handler = CallbackHandler(
             callbacks, self.model, self.tokenizer, self.optimizer, self.lr_scheduler
@@ -129,6 +132,15 @@ class HFTrainer(Trainer):
         self.state.weight_norm = None
         self.state.grad_norm = None
         self.state.evaluation_task_results = None
+
+    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
+        """Override prediction_step to handle None inputs gracefully."""
+        if inputs is None:
+            logger.warning("Received None inputs in prediction_step, skipping this batch")
+            return (None, None, None)
+        
+        # Call parent method
+        return super().prediction_step(model, inputs, prediction_loss_only, ignore_keys)
 
         # By default, we use stateful dataloader when we have iterable dataset.
         # This will be integrated in the future HF Trainer I guess.

@@ -3,6 +3,7 @@ import warnings
 import json
 from pathlib import Path
 from typing import Union, Optional, List
+import numpy as np
 import torch
 
 import rootutils
@@ -102,20 +103,28 @@ class MolDataModule:
             self.valid_set = set([])
         ### Don't understand this part, why validation set has split "train"?
         elif isinstance(validation_set_names, str):
-            self.eval_dataset = load_dataset(
-                validation_set_names, split="train", num_proc=num_proc
-            )
+            # Check if it's a local path saved with save_to_disk
+            if Path(validation_set_names).exists():
+                self.eval_dataset = load_from_disk(validation_set_names)
+            else:
+                self.eval_dataset = load_dataset(
+                    validation_set_names, split="train", num_proc=num_proc
+                )
             if self.filter_validation_set:
                 # this set will use moe than 1GB of RAM
                 self.valid_set = set(self.eval_dataset[self.mol_type])
         else:
             self.eval_dataset = {}
             for name in validation_set_names:
-                ### `load_dataset()` is very flexible, which can load dataset from local directory 
-                ### or from Hugging Face Hub.
-                self.eval_dataset[Path(name).name] = load_dataset(
-                    name, split="train", num_proc=num_proc
-                )
+                ### Check if it's a local path saved with save_to_disk
+                if Path(name).exists():
+                    self.eval_dataset[Path(name).name] = load_from_disk(name)
+                else:
+                    ### `load_dataset()` is very flexible, which can load dataset from local directory 
+                    ### or from Hugging Face Hub.
+                    self.eval_dataset[Path(name).name] = load_dataset(
+                        name, split="train", num_proc=num_proc
+                    )
             if self.filter_validation_set:
                 # this set will use moe than 1GB of RAM
                 self.valid_set = set()
@@ -128,42 +137,91 @@ class MolDataModule:
     def _build_collate_fn(self):
         """Wrap Hugging Face LM collator to optionally attach protein inputs and posterior params.
 
-        Returns a function that takes a list[dict] and returns a dict of tensors on the configured device.
+        Returns a function that takes a list[dict] and returns a dict of tensors on CPU.
+        Note: Device movement is handled by Trainer, not in collate_fn, to avoid CUDA issues
+        with multiprocessing DataLoader workers.
         """
         import torch
 
         base_collator = self.data_collator
         include_cond_features = self.include_condition_features
-        target_device = self.device if self.device is not None else torch.device("cpu")
 
         def _collate(features: List[dict]):
-            batch = base_collator(features)
-            # Ensure expected dtypes
-            if "input_ids" in batch:
-                batch["input_ids"] = batch["input_ids"].to(target_device)
-            if "attention_mask" in batch:
-                # keep original int64 mask from collator; model may cast as needed
-                batch["attention_mask"] = batch["attention_mask"].to(target_device)
-            if "labels" in batch:
-                batch["labels"] = batch["labels"].to(target_device)
+            # Extract condition features before passing to base_collator
+            # DataCollatorForLanguageModeling only expects token-related fields (input_ids, etc.)
+            condition_feature_keys = ["pocket_vec", "evo_vec", "ifp", "ligand_vec"]
+            condition_features = {}
+            
+            if include_cond_features:
+                # Extract condition features from each feature dict
+                for key in condition_feature_keys:
+                    if key in features[0]:
+                        condition_features[key] = [f[key] for f in features]
+            
+            # Create features dict with only token-related fields for base_collator
+            token_features = []
+            for f in features:
+                token_feature = {k: v for k, v in f.items() if k not in condition_feature_keys}
+                token_features.append(token_feature)
+            
+            # Collate token-related features
+            batch = base_collator(token_features)
+            # Keep tensors on CPU - Trainer will move them to the correct device
+            # This avoids CUDA re-initialization issues in DataLoader worker processes
 
             B = batch["input_ids"].size(0) if "input_ids" in batch else len(features)
 
+            # Add condition features to batch
             if include_cond_features:
-                # Check if condition features are already in the dataset
-                if all(key in features[0] for key in ["pocket_vec", "evo_vec", "ifp", "ligand_vec"]):
-                    # Load real condition features from dataset
-                    batch["pocket_vec"] = torch.stack([torch.tensor(f["pocket_vec"], dtype=torch.float32) for f in features]).to(target_device)
-                    batch["evo_vec"] = torch.stack([torch.tensor(f["evo_vec"], dtype=torch.float32) for f in features]).to(target_device)
-                    batch["ifp"] = torch.stack([torch.tensor(f["ifp"], dtype=torch.float32) for f in features]).to(target_device)
-                    batch["ligand_vec"] = torch.stack([torch.tensor(f["ligand_vec"], dtype=torch.float32) for f in features]).to(target_device)
+                available_keys = list(condition_features.keys())
+                required_keys = condition_feature_keys
+                
+                if len(available_keys) == len(required_keys):
+                    # Load real condition features from dataset (keep on CPU)
+                    # Check for None values and handle them
+                    def safe_tensor(f, default_shape, default_name):
+                        """Convert feature to tensor, using random initialization if None/invalid."""
+                        if f is None:
+                            if not hasattr(_collate, f'_warned_{default_name}'):
+                                print(f"Warning: Found None value in {default_name}, using random initialization.")
+                                _collate.__dict__[f'_warned_{default_name}'] = True
+                            return torch.randn(default_shape, dtype=torch.float32)
+                        try:
+                            arr = np.array(f, dtype=np.float32)
+                            # Check for NaN or Inf
+                            if np.any(np.isnan(arr)) or np.any(np.isinf(arr)):
+                                if not hasattr(_collate, f'_warned_{default_name}_nan'):
+                                    print(f"Warning: Found NaN/Inf in {default_name}, using random initialization.")
+                                    _collate.__dict__[f'_warned_{default_name}_nan'] = True
+                                return torch.randn(default_shape, dtype=torch.float32)
+                            return torch.tensor(arr, dtype=torch.float32)
+                        except (ValueError, TypeError):
+                            if not hasattr(_collate, f'_warned_{default_name}_invalid'):
+                                print(f"Warning: Invalid value in {default_name}, using random initialization.")
+                                _collate.__dict__[f'_warned_{default_name}_invalid'] = True
+                            return torch.randn(default_shape, dtype=torch.float32)
+                    
+                    batch["pocket_vec"] = torch.stack([safe_tensor(f, (512,), "pocket_vec") for f in condition_features["pocket_vec"]])
+                    batch["evo_vec"] = torch.stack([safe_tensor(f, (1280,), "evo_vec") for f in condition_features["evo_vec"]])
+                    batch["ifp"] = torch.stack([safe_tensor(f, (16384,), "ifp") for f in condition_features["ifp"]])
+                    batch["ligand_vec"] = torch.stack([safe_tensor(f, (1536,), "ligand_vec") for f in condition_features["ligand_vec"]])
                 else:
-                    # Fallback: use random initialization if features not in dataset
-                    print("Warning: Condition features not found in dataset, using random initialization")
-                    batch["pocket_vec"] = torch.randn(B, 512, dtype=torch.float32, device=target_device)  # Uni-Mol pocket embedding
-                    batch["evo_vec"] = torch.randn(B, 1280, dtype=torch.float32, device=target_device)    # ESM-2 evolutionary embedding
-                    batch["ifp"] = torch.randn(B, 16384, dtype=torch.float32, device=target_device)      # Interaction fingerprint
-                    batch["ligand_vec"] = torch.randn(B, 1536, dtype=torch.float32, device=target_device) # Ligand molecular representation
+                    # Fallback: use random initialization if features not in dataset (keep on CPU)
+                    missing_keys = [key for key in required_keys if key not in available_keys]
+                    if len(available_keys) == 0:
+                        # Only print warning once per batch (first time)
+                        if not hasattr(_collate, '_warned'):
+                            print(f"Warning: Condition features not found in dataset. Missing: {missing_keys}. Using random initialization.")
+                            print(f"Available keys in dataset: {list(features[0].keys())}")
+                            _collate._warned = True
+                    else:
+                        if not hasattr(_collate, '_warned_partial'):
+                            print(f"Warning: Some condition features missing. Found: {available_keys}, Missing: {missing_keys}. Using random initialization for all.")
+                            _collate._warned_partial = True
+                    batch["pocket_vec"] = torch.randn(B, 512, dtype=torch.float32)  # Uni-Mol pocket embedding
+                    batch["evo_vec"] = torch.randn(B, 1280, dtype=torch.float32)    # ESM-2 evolutionary embedding
+                    batch["ifp"] = torch.randn(B, 16384, dtype=torch.float32)      # Interaction fingerprint
+                    batch["ligand_vec"] = torch.randn(B, 1536, dtype=torch.float32) # Ligand molecular representation
 
             return batch
 
@@ -265,7 +323,7 @@ class MolDataModule:
             tokenizer (PreTrainedTokenizerFast): Tokenizer to be used.
 
         Returns:
-            dict: Dictionary with the tokenized data.
+            dict: Dictionary with the tokenized data, preserving condition features if present.
         """
         outputs = tokenizer(
             element[mol_type],
@@ -274,7 +332,15 @@ class MolDataModule:
             padding="max_length",
             add_special_tokens=True,
         )
-        return {"input_ids": outputs["input_ids"]}
+        result = {"input_ids": outputs["input_ids"]}
+        
+        # Preserve condition features if they exist in the element
+        condition_feature_keys = ["pocket_vec", "evo_vec", "ifp", "ligand_vec"]
+        for key in condition_feature_keys:
+            if key in element:
+                result[key] = element[key]
+        
+        return result
 
     @staticmethod
     def transfer_mol_type(
@@ -331,8 +397,11 @@ class MolDataModule:
         """
         assert self.streaming is False
 
-        # Load dataset
-        dataset = load_dataset(self.dataset_name, num_proc=self.num_proc, split="train")
+        # Load dataset - check if it's a local path saved with save_to_disk
+        if Path(self.dataset_name).exists():
+            dataset = load_from_disk(self.dataset_name)
+        else:
+            dataset = load_dataset(self.dataset_name, num_proc=self.num_proc, split="train")
         column_names = list(dataset.features)
         ### Check if Molecular type conversion needed.
         if self.mol_type not in column_names:
@@ -355,10 +424,14 @@ class MolDataModule:
             )
 
         # Tokenize dataset
+        # Preserve condition features columns when removing other columns
+        condition_feature_keys = ["pocket_vec", "evo_vec", "ifp", "ligand_vec"]
+        columns_to_remove = [col for col in column_names if col not in condition_feature_keys]
+        
         tokenized_dataset = dataset.map(
             self.tokenize_function,
             batched=True,
-            remove_columns=column_names,
+            remove_columns=columns_to_remove,  # Don't remove condition features
             num_proc=self.num_proc,
             fn_kwargs={
                 "max_length": self.max_seq_length,
@@ -412,9 +485,13 @@ class MolDataModule:
 
             dataset = dataset.filter(self.filter_smiles)
 
+            # Preserve condition features columns when removing other columns
+            condition_feature_keys = ["pocket_vec", "evo_vec", "ifp", "ligand_vec"]
+            columns_to_remove = [col for col in column_names if col not in condition_feature_keys]
+
             tokenized_dataset = dataset.map(
                 self.tokenize_function,
-                remove_columns=column_names,
+                remove_columns=columns_to_remove,  # Don't remove condition features
                 fn_kwargs={
                     "max_length": self.max_seq_length,
                     "mol_type": self.mol_type,
@@ -458,7 +535,7 @@ class MolDataModule:
             print("change mol_type from to", self.mol_type)
             _val_dataset = _val_dataset.map(
                 self.transfer_mol_type,
-                batched=True,
+                batched=False,  # transfer_mol_type expects single elements, not batches
                 num_proc=self.num_proc,
                 fn_kwargs={
                     "target_mol_type": self.mol_type,
@@ -466,10 +543,14 @@ class MolDataModule:
             )
             column_names += [self.mol_type]
 
+        # Preserve condition features columns when removing other columns
+        condition_feature_keys = ["pocket_vec", "evo_vec", "ifp", "ligand_vec"]
+        columns_to_remove = [col for col in column_names if col not in condition_feature_keys]
+        
         _val_dataset = _val_dataset.map(
             self.tokenize_function,
             batched=True,
-            remove_columns=column_names,
+            remove_columns=columns_to_remove,  # Don't remove condition features
             num_proc=self.num_proc,
             fn_kwargs={
                 "max_length": self.max_seq_length,

@@ -217,9 +217,15 @@ class NovoMolGenConfig(LlamaConfig):
                  residual_in_fp32: bool = True,
                  loss_type: str = 'ForCausalLM',
                  beta_kl: float = 0.1,
+                 # KL annealing parameters
+                 beta_kl_init: float = 0.0,
+                 beta_kl_final: float = 1.0,
+                 beta_kl_anneal_type: str = "linear",  # "linear", "cosine", "cyclical"
+                 beta_kl_anneal_steps: int = 30000,
+                 beta_kl_eval: Optional[float] = None,  # Fixed beta for evaluation
                  enable_cross_attn: bool = False,
                  cross_layers: Optional[List[int]] = None,
-                 cond_tokens_len: int = 128,
+                 cond_tokens_len: int = 512,
                  # Finetune / LoRA controls
                  train_new_modules_only: bool = True,
                  enable_lora: bool = False,
@@ -227,6 +233,8 @@ class NovoMolGenConfig(LlamaConfig):
                  lora_alpha: int = 32,
                  lora_dropout: float = 0.05,
                  lora_target_modules: Optional[List[str]] = None,
+                 # Ligand normalization
+                 ligand_vec_stats_path: Optional[str] = None,
                  **kwargs
                  ):
         super().__init__(**kwargs)
@@ -236,7 +244,13 @@ class NovoMolGenConfig(LlamaConfig):
         self.fused_dropout_add_ln = fused_dropout_add_ln
         self.residual_in_fp32 = residual_in_fp32
         self.loss_type = loss_type
-        self.beta_kl = float(beta_kl)
+        self.beta_kl = float(beta_kl)  # Legacy fixed beta (used if annealing not configured)
+        # KL annealing parameters
+        self.beta_kl_init = float(beta_kl_init)
+        self.beta_kl_final = float(beta_kl_final)
+        self.beta_kl_anneal_type = str(beta_kl_anneal_type)
+        self.beta_kl_anneal_steps = int(beta_kl_anneal_steps)
+        self.beta_kl_eval = float(beta_kl_eval) if beta_kl_eval is not None else None
         self.enable_cross_attn = enable_cross_attn
         self.cross_layers = cross_layers if cross_layers is not None else []
         self.cond_tokens_len = int(cond_tokens_len)
@@ -248,6 +262,8 @@ class NovoMolGenConfig(LlamaConfig):
         self.lora_dropout = float(lora_dropout)
         # If None, we will auto-detect at runtime
         self.lora_target_modules = lora_target_modules or []
+        # Ligand normalization statistics path
+        self.ligand_vec_stats_path = ligand_vec_stats_path
         self.auto_map = {"AutoModelForCausalLM": "modeling_novomolgen.NovoMolGen"}
 
     @classmethod
@@ -307,7 +323,7 @@ class CrossAttentionTransformer(nn.Module):
             # Initialize learnable gates for each layer
             # Use -1.0 for conservative initialization: sigmoid(-1) ≈ 0.27
             self.gates = nn.ParameterDict({
-                str(layer_idx): nn.Parameter(torch.tensor(-1.0))
+                str(layer_idx): nn.Parameter(torch.tensor(0.5))
                 for layer_idx in self.cross_layers
             })
             
@@ -356,6 +372,12 @@ class CrossAttentionTransformer(nn.Module):
                 # Create patched forward method with proper closure binding
                 def make_patched_forward(original_forward, adapter, gate, layer_idx, block_bound=block, self_bound=self):
                     def patched_forward(hidden_states, *args, **kwargs):
+                        # Ensure input hidden_states have correct dtype for flash_attn
+                        # This is critical because flash_attn's internal operations require float16/bfloat16
+                        model_dtype = next(self_bound.base_transformer.parameters()).dtype
+                        if hidden_states.dtype != model_dtype:
+                            hidden_states = hidden_states.to(model_dtype)
+                        
                         # Call original forward (self-attention + MLP)
                         original_output = original_forward(hidden_states, *args, **kwargs)
                         
@@ -371,8 +393,17 @@ class CrossAttentionTransformer(nn.Module):
                             # Apply layer norm before cross-attention
                             normed_output = F.layer_norm(output, output.shape[-1:])
                             
+                            # Ensure normed_output and cond_tokens have correct dtype for flash_attn cross-attention
+                            # flash_attn requires float16 or bfloat16, not float32
+                            model_dtype = next(self_bound.base_transformer.parameters()).dtype
+                            if normed_output.dtype != model_dtype:
+                                normed_output = normed_output.to(model_dtype)
+                            cond_tokens = self_bound._current_cond_tokens
+                            if cond_tokens.dtype != model_dtype:
+                                cond_tokens = cond_tokens.to(model_dtype)
+                            
                             # Apply cross-attention adapter (pure cross-attention, no residual)
-                            attn_out = adapter(normed_output, self_bound._current_cond_tokens, 
+                            attn_out = adapter(normed_output, cond_tokens, 
                                              self_bound._current_cond_attention_mask)
                             
                             # Apply dropout to attention output (single dropout point)
@@ -410,13 +441,26 @@ class CrossAttentionTransformer(nn.Module):
             cond_attention_mask: Attention mask for condition tokens [B, Lc] (True=padding)
         """
         # Store condition tokens for use in patched blocks
+        # Only update if cond_tokens is explicitly provided (not None)
+        # This allows generate_with_condition to set _current_cond_tokens before calling generate()
+        # and prevents generate() from overwriting it when calling forward() with cond_tokens=None
         if self.enable_cross_attn and self.cross_adapters:
-            self._current_cond_tokens = cond_tokens
-            self._current_cond_attention_mask = cond_attention_mask
+            if cond_tokens is not None:
+                # Explicitly provided cond_tokens: update _current_cond_tokens
+                self._current_cond_tokens = cond_tokens
+                self._current_cond_attention_mask = cond_attention_mask
+            # If cond_tokens is None, keep the existing _current_cond_tokens (set by generate_with_condition)
         
         # Call the base transformer (with patched blocks)
         hidden_states = self.base_transformer(input_ids, position_ids=position_ids, 
                                             inference_params=inference_params)
+        
+        # Ensure output hidden_states have correct dtype for flash_attn
+        # This is critical because flash_attn's internal operations (including inner_cross_attn for KV cache)
+        # require float16 or bfloat16, not float32
+        model_dtype = next(self.base_transformer.parameters()).dtype
+        if hidden_states.dtype != model_dtype:
+            hidden_states = hidden_states.to(model_dtype)
         
         # Clear condition tokens
         if hasattr(self, '_current_cond_tokens'):
@@ -453,18 +497,20 @@ class NovoMolGen(GPTLMHeadModel):
             
             # Initialize encoders with proper dimensions for the new architecture
             from .condition import create_ligand_encoder, create_protein_encoder, create_condition_fusion
-            cond_latent_dim = self.base_config.cond_tokens_len // 2  # z/2 as specified
+            cond_latent_dim = self.base_config.cond_tokens_len  # z/2 as specified
+            print(f"cond_latent_dim: {cond_latent_dim}")
             
             # Ligand encoder: takes ifp [B, 16384] and ligand_vec [B, 1536], outputs mu/logvar [B, z_dim]
             self.ligand_encoder = create_ligand_encoder(
                 latent_dim=cond_latent_dim,
                 ligand_input_dim=cond_latent_dim,  # This will be ignored in the new two-tower architecture
-                hidden_dim=256,
+                hidden_dim=512,
                 dropout=0.1,
                 d_ifp=16384,
                 d_mol=1536,
-                d_embed=768,
+                d_embed=512,
                 z_dim=cond_latent_dim,
+                ligand_vec_stats_path=getattr(config, 'ligand_vec_stats_path', None),
             )
             
             # Protein encoder: takes pocket_vec [B, 512] and evo_vec [B, 1280], outputs protein condition [B, z_dim]
@@ -490,6 +536,9 @@ class NovoMolGen(GPTLMHeadModel):
 
         # Finetune controls: optionally freeze base; LoRA applied externally
         self._maybe_setup_finetune_freeze_only()
+        
+        # Track current training step for KL annealing
+        self._current_step = 0
 
     # ------------------------
     # Finetune & LoRA utilities
@@ -539,6 +588,129 @@ class NovoMolGen(GPTLMHeadModel):
             for p in module.parameters():
                 p.requires_grad = True
 
+    def unfreeze_transformer_layer(self, layer_idx: int):
+        """
+        Unfreeze a specific transformer layer.
+        
+        Args:
+            layer_idx: Index of the layer to unfreeze (0-based, from bottom to top)
+                      For a model with 12 layers, indices are 0-11, where 11 is the top layer.
+        """
+        # Get transformer blocks from the wrapped transformer
+        if hasattr(self.transformer, 'base_transformer'):
+            base_transformer = self.transformer.base_transformer
+        else:
+            base_transformer = self.transformer
+        
+        # Try to find blocks/layers
+        blocks = None
+        if hasattr(base_transformer, 'blocks'):
+            blocks = base_transformer.blocks
+        elif hasattr(base_transformer, 'layers'):
+            blocks = base_transformer.layers
+        else:
+            # Try nested structures
+            for attr_name in ['transformer', 'model', 'encoder', 'decoder']:
+                if hasattr(base_transformer, attr_name):
+                    nested = getattr(base_transformer, attr_name)
+                    if hasattr(nested, 'blocks'):
+                        blocks = nested.blocks
+                        break
+                    elif hasattr(nested, 'layers'):
+                        blocks = nested.layers
+                        break
+        
+        if blocks is None:
+            logger.warning(f"Could not find transformer blocks/layers to unfreeze layer {layer_idx}")
+            return
+        
+        # Check if layer index is valid
+        if layer_idx < 0 or layer_idx >= len(blocks):
+            logger.warning(f"Layer index {layer_idx} is out of range (0-{len(blocks)-1})")
+            return
+        
+        # Unfreeze the layer
+        layer = blocks[layer_idx]
+        num_unfrozen = 0
+        for param in layer.parameters():
+            param.requires_grad = True
+            num_unfrozen += 1
+        
+        logger.info(f"✅ Unfroze transformer layer {layer_idx} ({num_unfrozen} parameters, total layers: {len(blocks)})")
+        
+        # Also unfreeze the corresponding cross-attention adapter and gate if they exist
+        if hasattr(self.transformer, 'cross_adapters') and self.transformer.cross_adapters is not None:
+            if str(layer_idx) in self.transformer.cross_adapters:
+                adapter = self.transformer.cross_adapters[str(layer_idx)]
+                adapter_num_unfrozen = 0
+                for param in adapter.parameters():
+                    param.requires_grad = True
+                    adapter_num_unfrozen += 1
+                logger.info(f"✅ Unfroze cross-attention adapter for layer {layer_idx} ({adapter_num_unfrozen} parameters)")
+        
+        if hasattr(self.transformer, 'gates') and self.transformer.gates is not None:
+            if str(layer_idx) in self.transformer.gates:
+                gate = self.transformer.gates[str(layer_idx)]
+                gate.requires_grad = True
+                logger.info(f"✅ Unfroze gate for layer {layer_idx}")
+
+    def _compute_beta_kl(self) -> float:
+        """
+        Compute current beta_kl value with annealing.
+        
+        Returns:
+            Current beta_kl value (float)
+        """
+        config = self.base_config
+        
+        # Check if annealing is configured (anneal_steps > 0 means annealing is enabled)
+        if hasattr(config, 'beta_kl_anneal_steps') and config.beta_kl_anneal_steps > 0:
+            # Use annealing
+            if not self.training and hasattr(config, 'beta_kl_eval') and config.beta_kl_eval is not None:
+                # Use fixed beta for evaluation
+                return float(config.beta_kl_eval)
+            
+            # Get current step
+            current_step = getattr(self, '_current_step', 0)
+            anneal_steps = config.beta_kl_anneal_steps
+            beta_init = config.beta_kl_init
+            beta_final = config.beta_kl_final
+            anneal_type = getattr(config, 'beta_kl_anneal_type', 'linear')
+            
+            # Clamp current_step to anneal_steps
+            progress = min(current_step / anneal_steps, 1.0)
+            
+            if anneal_type == 'linear':
+                # Linear interpolation: beta = beta_init + (beta_final - beta_init) * progress
+                beta = beta_init + (beta_final - beta_init) * progress
+            elif anneal_type == 'cosine':
+                # Cosine annealing: smooth transition
+                import math
+                beta = beta_init + (beta_final - beta_init) * (1.0 - math.cos(math.pi * progress)) / 2.0
+            elif anneal_type == 'cyclical':
+                # Cyclical annealing: cycle between init and final
+                import math
+                cycle_progress = (math.sin(2.0 * math.pi * progress) + 1.0) / 2.0  # 0 to 1
+                beta = beta_init + (beta_final - beta_init) * cycle_progress
+            else:
+                # Unknown type, fall back to linear
+                beta = beta_init + (beta_final - beta_init) * progress
+            
+            return float(beta)
+        else:
+            # Use fixed beta (legacy behavior)
+            return float(getattr(config, 'beta_kl', 0.1))
+    
+    def set_training_step(self, step: int):
+        """
+        Set current training step for KL annealing.
+        Should be called by Trainer callback or training loop.
+        
+        Args:
+            step: Current global training step
+        """
+        self._current_step = int(step)
+    
     def _maybe_setup_finetune_freeze_only(self):
         """
         If base_config.train_new_modules_only is True (default),
@@ -670,8 +842,10 @@ class NovoMolGen(GPTLMHeadModel):
                 protein_condition = self.protein_encoder(pocket_vec, evo_vec)
             else:
                 # Fallback to dummy protein condition
-                cond_latent_dim = self.base_config.cond_tokens_len // 2
+                print(f"Warning: No protein condition provided, breaking the training loop")
+                cond_latent_dim = self.base_config.cond_tokens_len
                 protein_condition = torch.zeros(bsz, cond_latent_dim, dtype=dtype, device=device)
+                raise ValueError("No protein condition provided, breaking the training loop")
             
             # Process ligand condition: ifp + ligand_vec -> mu, logvar, then sample z
             if ifp is not None and ligand_vec is not None:
@@ -681,15 +855,17 @@ class NovoMolGen(GPTLMHeadModel):
                 z = mu + (0.5 * logvar).exp() * eps
             else:
                 # Fallback: sample z from standard normal (no ligand condition)
-                cond_latent_dim = self.base_config.cond_tokens_len // 2
+                print(f"Warning: No ligand condition provided, sampling z from standard normal")
+                cond_latent_dim = self.base_config.cond_tokens_len
                 z = torch.randn(bsz, cond_latent_dim, dtype=dtype, device=device)
             
             # Fuse protein and ligand conditions using sampled z
             fused_condition = self.condition_fusion(protein_condition, z)
             
             # Project to cond_tokens: [B, Lc, d] where Lc = cond_tokens_len
-            cond_vector = torch.cat([z, fused_condition], dim=-1)  # [B, 2*dz]
-            cond_tokens = self.cond_proj(cond_vector.unsqueeze(-1))  # [B, Lc, d]
+            # cond_vector = torch.cat([protein_condition, fused_condition], dim=-1)  # [B, 2*dz]
+            cond_vector = fused_condition
+            cond_tokens = self.cond_proj(cond_vector.unsqueeze(-1))  # [B, Lc (2*dz), d]
             cond_attention_mask = torch.zeros(cond_tokens.size(0), cond_tokens.size(1), dtype=torch.bool, device=device)
 
         # Build args for calling the underlying transformer. Only pass cross-attention
@@ -745,14 +921,28 @@ class NovoMolGen(GPTLMHeadModel):
         if ifp is not None and ligand_vec is not None and hasattr(self, 'ligand_encoder'):
             # Use KL from the ligand encoder's posterior
             mu, sigma, logvar = self.ligand_encoder(ifp, ligand_vec, return_logvar=True)
-            kl_per_sample = 0.5 * (logvar.exp() + mu.pow(2) - 1.0 - logvar)
-            kl_loss = kl_per_sample.sum(dim=-1).mean()
+            kl_per_dim= 0.5 * (logvar.exp() + mu.pow(2) - 1.0 - logvar)
+            
+            # fb = getattr(self, "free_bits", 0.5)
+            # if fb and fb > 0:
+            #     kl_per_dim = torch.clamp(kl_per_dim, min=fb)
+            
+            kl_loss = kl_per_dim.sum(dim=-1).mean()  # Average per sample (sum over latent_dim)
+            
+            # Normalize KL loss to per-token scale (to match NLL loss normalization)
+            # This ensures KL loss and NLL loss have similar scales
+            if labels is not None:
+                # Calculate average sequence length (excluding padding tokens with label -100)
+                seq_lengths = (labels != -100).sum(dim=1).float()  # [batch_size]
+                avg_seq_len = seq_lengths.mean()  # Average sequence length
+                if avg_seq_len > 0:
+                    kl_loss = kl_loss / avg_seq_len
+                    # Now KL loss is normalized to "per token" scale, matching NLL loss
         else:
             kl_loss = torch.tensor(0.0, dtype=lm_logits.dtype, device=lm_logits.device)
 
-        # TODO: Implement beta scheduling (linear warm-up from 0 to beta_max over kl_warmup_steps)
-        # For now, use fixed beta value from config
-        beta = getattr(self.base_config, 'beta_kl', 0.1)
+        # Compute beta_kl with annealing if configured
+        beta = self._compute_beta_kl()
         beta_tensor = torch.tensor(beta, dtype=lm_logits.dtype, device=lm_logits.device)
 
         # Total loss: nll + beta * kl (if nll is None, just return beta*kl to avoid returning None)
@@ -761,6 +951,15 @@ class NovoMolGen(GPTLMHeadModel):
             loss = nll_loss + beta_tensor * kl_loss
         else:
             loss = beta_tensor * kl_loss
+        
+        # Store losses for monitoring (detached to avoid gradient issues)
+        # These will be accessed by LossMonitoringCallback
+        if self.training:
+            self._last_nll_loss = nll_loss.item() if nll_loss is not None else 0.0
+            self._last_kl_loss = (beta_tensor * kl_loss).item() if kl_loss is not None else 0.0
+            self._last_kl_loss_unscaled = kl_loss.item() if kl_loss is not None else 0.0
+            self._last_beta = beta
+        
         ### Return standard HF output format.
         return CausalLMOutput(loss=loss, logits=lm_logits, hidden_states=hidden_states)
 
@@ -974,37 +1173,56 @@ class NovoMolGen(GPTLMHeadModel):
         bsz = input_ids.size(0)
 
         # Process condition features using the new encoder architecture
+        # Get model dtype to ensure type compatibility with cross-attention
+        model_dtype = next(self.parameters()).dtype
+        cond_latent_dim = self.base_config.cond_tokens_len
+        
         if pocket_vec is not None and evo_vec is not None and ifp is not None and ligand_vec is not None:
             # Use new encoder architecture
-            protein_condition = self.protein_encoder(pocket_vec.to(device), evo_vec.to(device))
-            mu, sigma, logvar = self.ligand_encoder(ifp.to(device), ligand_vec.to(device), return_logvar=True)
+            # Ensure input features are on correct device and dtype
+            pocket_vec = pocket_vec.to(device).to(model_dtype)
+            evo_vec = evo_vec.to(device).to(model_dtype)
+            ifp = ifp.to(device).to(model_dtype)
+            ligand_vec = ligand_vec.to(device).to(model_dtype)
+            
+            protein_condition = self.protein_encoder(pocket_vec, evo_vec)
+            mu, sigma, logvar = self.ligand_encoder(ifp, ligand_vec, return_logvar=True)
             
             # Sample z from posterior
             if sample_posterior:
-                eps = torch.randn_like(mu)
-                z = mu + (0.5 * logvar).exp() * eps
+                z = torch.randn(bsz, cond_latent_dim, dtype=model_dtype, device=device)
             else:
+                # eps = torch.randn_like(mu)
+                # z = mu + (0.5 * logvar).exp() * eps
                 z = mu
             
             # Fuse conditions using sampled z
             fused_condition = self.condition_fusion(protein_condition, z)
             
             # Build condition tokens
-            cond_vector = torch.cat([z, fused_condition], dim=-1)  # [B, 2*dz]
+            # cond_vector = torch.cat([z, fused_condition], dim=-1)  # [B, 2*dz]
+            cond_vector = fused_condition
             new_cond_tokens = self.cond_proj(cond_vector.unsqueeze(-1))  # [B, 2*dz, d]
+            # Ensure cond_tokens have correct dtype for cross-attention (critical for flash_attn)
+            new_cond_tokens = new_cond_tokens.to(model_dtype)
             new_cond_mask = torch.zeros(bsz, new_cond_tokens.size(1), dtype=torch.bool, device=device)
         
         elif pocket_vec is not None and evo_vec is not None:
-            protein_condition = self.protein_encoder(pocket_vec.to(device), evo_vec.to(device))
-            cond_latent_dim = self.base_config.cond_tokens_len // 2
-            z = torch.randn(bsz, cond_latent_dim, dtype=torch.float32, device=device)
+            # Ensure input features are on correct device and dtype
+            pocket_vec = pocket_vec.to(device).to(model_dtype)
+            evo_vec = evo_vec.to(device).to(model_dtype)
+            protein_condition = self.protein_encoder(pocket_vec, evo_vec)
+            cond_latent_dim = self.base_config.cond_tokens_len
+            z = torch.randn(bsz, cond_latent_dim, dtype=model_dtype, device=device)
             fused_condition = self.condition_fusion(protein_condition, z)
             new_cond_tokens = self.cond_proj(fused_condition.unsqueeze(-1))  # [B, dz, d]
+            # Ensure cond_tokens have correct dtype for cross-attention
+            new_cond_tokens = new_cond_tokens.to(model_dtype)
             new_cond_mask = torch.zeros(bsz, new_cond_tokens.size(1), dtype=torch.bool, device=device)
         else:
             # Fallback: use dummy conditions if not all features provided
             print("no condition features provided")
-            cond_latent_dim = self.base_config.cond_tokens_len // 2
+            cond_latent_dim = self.base_config.cond_tokens_len
             # Use the same dtype as the model parameters
             model_dtype = next(self.parameters()).dtype
             z = torch.randn(bsz, cond_latent_dim, dtype=model_dtype, device=device)
@@ -1012,14 +1230,15 @@ class NovoMolGen(GPTLMHeadModel):
             fused_condition = self.condition_fusion(protein_condition, z)
             
             # Build condition tokens
-            cond_vector = torch.cat([z, fused_condition], dim=-1)  # [B, 2*dz]
+            # cond_vector = torch.cat([protein_condition, fused_condition], dim=-1)  # [B, 2*dz]
+            cond_vector = fused_condition
             new_cond_tokens = self.cond_proj(cond_vector.unsqueeze(-1))  # [B, 2*dz, d]
             new_cond_mask = torch.zeros(bsz, new_cond_tokens.size(1), dtype=torch.bool, device=device)
 
         # Merge with existing condition tokens if provided
         if cond_tokens is not None and append:
             assert cond_tokens.dim() == 3 and cond_tokens.size(0) == bsz, "cond_tokens must be [B, Lc0, d]"
-            cond_tokens = torch.cat([cond_tokens.to(device), new_cond_tokens], dim=1)
+            cond_tokens = torch.cat([cond_tokens.to(device).to(model_dtype), new_cond_tokens], dim=1)
             if cond_attention_mask is None:
                 cond_attention_mask = torch.zeros(bsz, cond_tokens.size(1), dtype=torch.bool, device=device)
             else:

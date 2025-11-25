@@ -52,8 +52,8 @@ def run_tokenize(cfg: DictConfig) -> None:
     print(f"Tokenising {dm.dataset_name} and writing to {cache_dir} …")
     dm.create_tokenized_datasets()
     # TODO: Maybe a bug here, `train_dataset` is not defined in `create_tokenized_datasets()`, see what happens.
-    print(f"Done.  Train={len(dm.train_dataset)}  |  "
-          f"Eval={dm.eval_dataset and len(dm.eval_dataset) or 0}")
+    # print(f"Done.  Train={len(dm.train_dataset)}  |  "
+    #       f"Eval={dm.eval_dataset and len(dm.eval_dataset) or 0}")
 
 def run_train(cfg: DictConfig) -> None:
     exp_name = creat_unique_experiment_name(cfg)
@@ -188,7 +188,7 @@ class EntryPoint:
 
     def tokenize_dataset(
         self,
-        config_name: str = "ZINC_1B_smiles_atomwise",   # a dataset-only YAML
+        config_name: str = "bdnv2",   # a dataset-only YAML
         config_dir: str = "../configs/dataset",
         **overrides,
     ):
