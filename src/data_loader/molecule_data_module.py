@@ -9,7 +9,7 @@ import torch
 import rootutils
 import safe
 import selfies as sf
-from datasets import load_dataset, load_from_disk
+from datasets import load_dataset, load_from_disk, Features, Value, Sequence
 from datasets.config import HF_CACHE_HOME
 from datasets.naming import camelcase_to_snakecase
 from deepsmiles import Converter
@@ -105,7 +105,42 @@ class MolDataModule:
         elif isinstance(validation_set_names, str):
             # Check if it's a local path saved with save_to_disk
             if Path(validation_set_names).exists():
-                self.eval_dataset = load_from_disk(validation_set_names)
+                try:
+                    self.eval_dataset = load_from_disk(validation_set_names)
+                except (TypeError, AttributeError, ValueError) as e:
+                    # Handle dataset compatibility issues (e.g., "must be called with a dataclass type or instance")
+                    # Fallback: load from arrow files with explicit features
+                    warnings.warn(
+                        f"Failed to load validation dataset from {validation_set_names}: {e}\n"
+                        f"Attempting fallback: loading from arrow files with explicit features..."
+                    )
+                    try:
+                        arrow_files = sorted(Path(validation_set_names).glob("*.arrow"))
+                        if arrow_files:
+                            # Define correct features with Sequence (not List)
+                            features = Features({
+                                'SMILES': Value('string'),
+                                'pocket_vec': Sequence(Value('float64')),
+                                'evo_vec': Sequence(Value('float32')),
+                                'ifp': Sequence(Value('float32')),
+                                'ligand_vec': Sequence(Value('float32')),
+                            })
+                            self.eval_dataset = load_dataset(
+                                "arrow",
+                                data_files=[str(f) for f in arrow_files],
+                                features=features,
+                                split="train",
+                                num_proc=num_proc
+                            )
+                            warnings.warn(f"Successfully loaded validation dataset using arrow fallback")
+                        else:
+                            raise ValueError(f"No arrow files found in {validation_set_names}")
+                    except Exception as e2:
+                        warnings.warn(
+                            f"Fallback also failed: {e2}\n"
+                            f"Setting eval_dataset to None"
+                        )
+                        self.eval_dataset = None
             else:
                 self.eval_dataset = load_dataset(
                     validation_set_names, split="train", num_proc=num_proc
@@ -118,7 +153,43 @@ class MolDataModule:
             for name in validation_set_names:
                 ### Check if it's a local path saved with save_to_disk
                 if Path(name).exists():
-                    self.eval_dataset[Path(name).name] = load_from_disk(name)
+                    try:
+                        self.eval_dataset[Path(name).name] = load_from_disk(name)
+                    except (TypeError, AttributeError, ValueError) as e:
+                        # Handle dataset compatibility issues (e.g., "must be called with a dataclass type or instance")
+                        # Fallback: load from arrow files with explicit features
+                        warnings.warn(
+                            f"Failed to load validation dataset from {name}: {e}\n"
+                            f"Attempting fallback: loading from arrow files with explicit features..."
+                        )
+                        try:
+                            arrow_files = sorted(Path(name).glob("*.arrow"))
+                            if arrow_files:
+                                # Define correct features with Sequence (not List)
+                                features = Features({
+                                    'SMILES': Value('string'),
+                                    'pocket_vec': Sequence(Value('float64')),
+                                    'evo_vec': Sequence(Value('float32')),
+                                    'ifp': Sequence(Value('float32')),
+                                    'ligand_vec': Sequence(Value('float32')),
+                                })
+                                self.eval_dataset[Path(name).name] = load_dataset(
+                                    "arrow",
+                                    data_files=[str(f) for f in arrow_files],
+                                    features=features,
+                                    split="train",
+                                    num_proc=num_proc
+                                )
+                                warnings.warn(f"Successfully loaded validation dataset using arrow fallback")
+                            else:
+                                raise ValueError(f"No arrow files found in {name}")
+                        except Exception as e2:
+                            warnings.warn(
+                                f"Fallback also failed: {e2}\n"
+                                f"Skipping this validation set"
+                            )
+                            # Continue without this validation set
+                            continue
                 else:
                     ### `load_dataset()` is very flexible, which can load dataset from local directory 
                     ### or from Hugging Face Hub.
@@ -399,7 +470,41 @@ class MolDataModule:
 
         # Load dataset - check if it's a local path saved with save_to_disk
         if Path(self.dataset_name).exists():
-            dataset = load_from_disk(self.dataset_name)
+            try:
+                dataset = load_from_disk(self.dataset_name)
+            except (TypeError, AttributeError, ValueError) as e:
+                # Handle dataset compatibility issues (e.g., "must be called with a dataclass type or instance")
+                # Fallback: load from arrow files with explicit features
+                warnings.warn(
+                    f"Failed to load training dataset from {self.dataset_name}: {e}\n"
+                    f"Attempting fallback: loading from arrow files with explicit features..."
+                )
+                try:
+                    arrow_files = sorted(Path(self.dataset_name).glob("*.arrow"))
+                    if arrow_files:
+                        # Define correct features with Sequence (not List)
+                        features = Features({
+                            'SMILES': Value('string'),
+                            'pocket_vec': Sequence(Value('float64')),
+                            'evo_vec': Sequence(Value('float32')),
+                            'ifp': Sequence(Value('float32')),
+                            'ligand_vec': Sequence(Value('float32')),
+                        })
+                        dataset = load_dataset(
+                            "arrow",
+                            data_files=[str(f) for f in arrow_files],
+                            features=features,
+                            split="train",
+                            num_proc=self.num_proc
+                        )
+                        warnings.warn(f"Successfully loaded training dataset using arrow fallback")
+                    else:
+                        raise ValueError(f"No arrow files found in {self.dataset_name}")
+                except Exception as e2:
+                    raise RuntimeError(
+                        f"Failed to load training dataset: {e2}\n"
+                        f"Please regenerate the dataset with correct features (Sequence instead of List)"
+                    ) from e2
         else:
             dataset = load_dataset(self.dataset_name, num_proc=self.num_proc, split="train")
         column_names = list(dataset.features)

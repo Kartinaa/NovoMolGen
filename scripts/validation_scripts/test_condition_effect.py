@@ -24,14 +24,14 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 import torch
-from datasets import load_from_disk
+from datasets import load_from_disk, load_dataset, Features, Value, Sequence
 import safe  # 用于 SMILES -> SAFE 转换
 
 # 把 src 加到路径，方便导入模型
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT / "src"))
 
-from models.modeling_novomolgen_backup import NovoMolGen, NovoMolGenConfig  # type: ignore
+from models.modeling_novomolgen_infonce_depot import NovoMolGen, NovoMolGenConfig  # type: ignore
 from transformers import AutoTokenizer  # type: ignore
 
 
@@ -103,7 +103,43 @@ def load_model_and_tokenizer(model_path: str, logger: logging.Logger):
 
 def load_validation_set(path: str, logger: logging.Logger, smiles_key: str = None):
     logger.info(f"Loading validation set from: {path}")
-    ds = load_from_disk(path)
+    try:
+        ds = load_from_disk(path)
+    except (TypeError, AttributeError, ValueError) as e:
+        # Handle dataset compatibility issues (e.g., "must be called with a dataclass type or instance")
+        # Fallback: load from arrow files with explicit features
+        logger.warning(
+            f"Failed to load validation set from {path} using load_from_disk: {e}\n"
+            f"Attempting fallback: loading from arrow files with explicit features..."
+        )
+        try:
+            path_obj = Path(path)
+            arrow_files = sorted(path_obj.glob("*.arrow"))
+            if arrow_files:
+                # Define correct features with Sequence (not List)
+                features = Features({
+                    'SMILES': Value('string'),
+                    'pocket_vec': Sequence(Value('float64')),
+                    'evo_vec': Sequence(Value('float32')),
+                    'ifp': Sequence(Value('float32')),
+                    'ligand_vec': Sequence(Value('float32')),
+                })
+                ds = load_dataset(
+                    "arrow",
+                    data_files=[str(f) for f in arrow_files],
+                    features=features,
+                    split="train"
+                )
+                logger.info(f"Successfully loaded validation set using arrow fallback")
+            else:
+                raise ValueError(f"No arrow files found in {path}")
+        except Exception as e2:
+            logger.error(
+                f"Fallback also failed: {e2}\n"
+                f"Cannot load validation set: {path}"
+            )
+            raise
+    
     logger.info(f"Validation set size: {len(ds)}")
     if len(ds) == 0:
         raise ValueError("Validation set is empty.")

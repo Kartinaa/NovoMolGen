@@ -21,13 +21,13 @@ import numpy as np
 import random
 import torch
 import yaml
-from datasets import load_from_disk
+from datasets import load_from_disk, load_dataset, Features, Value, Sequence
 from tqdm import tqdm
 
 # Add src to path
 sys.path.append(str(Path(__file__).parent.parent / "src"))
 
-from models.modeling_novomolgen_infonce_depot import NovoMolGen, NovoMolGenConfig
+from models.modeling_novomolgen_infonce_120225 import NovoMolGen, NovoMolGenConfig
 from data_loader.molecule_tokenizer import MoleculeTokenizer
 from data_loader.utils import safe_to_smiles
 from transformers import AutoTokenizer
@@ -139,7 +139,42 @@ def load_validation_sets(validation_set_paths: Union[str, List[str]], logger: lo
     for val_path in validation_set_paths:
         val_path = Path(val_path)
         if val_path.exists():
-            dataset = load_from_disk(str(val_path))
+            try:
+                dataset = load_from_disk(str(val_path))
+            except (TypeError, AttributeError, ValueError) as e:
+                # Handle dataset compatibility issues (e.g., "must be called with a dataclass type or instance")
+                # Fallback: load from arrow files with explicit features
+                logger.warning(
+                    f"Failed to load validation set from {val_path} using load_from_disk: {e}\n"
+                    f"Attempting fallback: loading from arrow files with explicit features..."
+                )
+                try:
+                    arrow_files = sorted(val_path.glob("*.arrow"))
+                    if arrow_files:
+                        # Define correct features with Sequence (not List)
+                        features = Features({
+                            'SMILES': Value('string'),
+                            'pocket_vec': Sequence(Value('float64')),
+                            'evo_vec': Sequence(Value('float32')),
+                            'ifp': Sequence(Value('float32')),
+                            'ligand_vec': Sequence(Value('float32')),
+                        })
+                        dataset = load_dataset(
+                            "arrow",
+                            data_files=[str(f) for f in arrow_files],
+                            features=features,
+                            split="train"
+                        )
+                        logger.info(f"Successfully loaded validation set using arrow fallback")
+                    else:
+                        raise ValueError(f"No arrow files found in {val_path}")
+                except Exception as e2:
+                    logger.error(
+                        f"Fallback also failed: {e2}\n"
+                        f"Skipping validation set: {val_path}"
+                    )
+                    continue
+            
             name = val_path.name
             validation_sets[name] = dataset
             logger.info(f"Loaded validation set '{name}': {len(dataset)} samples")

@@ -164,12 +164,31 @@ def convert_parquet_to_hf_dataset(
     
     # Find all training parquet files
     train_files = sorted(glob.glob(str(train_data_dir / train_pattern)))
+    
+    # If no files found with pattern, try to use train_data_dir as a single file
+    if not train_files:
+        if train_data_dir.is_file() and train_data_dir.suffix == '.parquet':
+            # train_data_dir is actually a single parquet file
+            train_files = [str(train_data_dir)]
+            train_data_dir = train_data_dir.parent
+            print(f"\n⚠️  Treating input as single parquet file: {train_files[0]}")
+        else:
+            raise FileNotFoundError(
+                f"No training files found matching pattern: {train_pattern}\n"
+                f"  Searched in: {train_data_dir}\n"
+                f"  Tip: If you have a single parquet file, pass it directly as --train_data_dir"
+            )
+    
     validation_file_path = train_data_dir / validation_file
     
-    if not train_files:
-        raise FileNotFoundError(f"No training files found matching pattern: {train_pattern}")
-    
-    print(f"\nFound {len(train_files)} training parquet files")
+    print(f"\nFound {len(train_files)} training parquet file(s)")
+    if len(train_files) <= 5:
+        for f in train_files:
+            print(f"  - {Path(f).name}")
+    else:
+        for f in train_files[:3]:
+            print(f"  - {Path(f).name}")
+        print(f"  ... and {len(train_files) - 3} more")
     print(f"Validation file: {validation_file_path}")
     print(f"Using {num_proc} processes for parallel conversion")
     
@@ -392,7 +411,7 @@ Examples:
         "--train_data_dir",
         type=str,
         required=True,
-        help="Directory containing parquet files"
+        help="Directory containing parquet files, or path to a single parquet file"
     )
     parser.add_argument(
         "--output_dir",
@@ -443,14 +462,22 @@ Examples:
     output_dir = Path(args.output_dir)
     
     if not train_data_dir.exists():
-        raise FileNotFoundError(f"Training data directory not found: {train_data_dir}")
+        raise FileNotFoundError(f"Training data path not found: {train_data_dir}")
+    
+    # If train_data_dir is a file, adjust the pattern to match it
+    if train_data_dir.is_file() and train_data_dir.suffix == '.parquet':
+        # Use the filename as pattern
+        train_pattern = train_data_dir.name
+        train_data_dir = train_data_dir.parent
+    else:
+        train_pattern = args.train_pattern
     
     # Convert to HuggingFace dataset
     hf_dataset = convert_parquet_to_hf_dataset(
         train_data_dir,
         output_dir,
         args.validation_file,
-        args.train_pattern,
+        train_pattern,
         args.num_proc,
         args.batch_size,
         infer_schema=not args.no_infer_schema,

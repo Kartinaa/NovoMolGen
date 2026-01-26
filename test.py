@@ -1,20 +1,38 @@
-import torch
-from torch import nn
+from safe import SAFEConverter
+import safe as sf
+from rdkit import Chem
+encoder = SAFEConverter(ignore_stereo=True)
 
-print("Torch:", torch.__version__, "CUDA:", torch.version.cuda, "Is CUDA available:", torch.cuda.is_available())
+# Purine scaffold with attachment point
+scaffold_smiles = '*C1NC2NCC(*)C(N3CCN(*)CC3)C2N1'
 
-def dump(x, name):
-    print(name, "device:", x.device, "dtype:", x.dtype, "shape:", tuple(x.shape), "contig:", x.is_contiguous())
 
-# 构造最小例子
-B, C = 4, 512
-q = torch.randn(B, 1, C, device='cuda', dtype=torch.bfloat16)
-k = torch.randn(B, 1, C, device='cuda', dtype=torch.bfloat16)
-v = torch.randn(B, 1, C, device='cuda', dtype=torch.bfloat16)
+# 先检查 SMILES 是否有效
+mol = Chem.MolFromSmiles(scaffold_smiles)
+if mol is None:
+    print(f"Invalid SMILES: {scaffold_smiles}")
+    print("Trying to sanitize...")
+    
+    # 尝试不同的选项
+    mol = Chem.MolFromSmiles(scaffold_smiles, sanitize=False)
+    print(f"If without sanitize, the mol is None: {mol is None}")
+    if mol is not None:
+        try:
+            Chem.SanitizeMol(mol)
+            scaffold_smiles = Chem.MolToSmiles(mol)
+            print(f"Sanitized SMILES: {scaffold_smiles}")
+        except Exception as e:
+            print(f"Sanitization failed: {e}")
+else:
+    print(f"Valid SMILES: {scaffold_smiles}")
 
-mha = nn.MultiheadAttention(embed_dim=C, num_heads=1, batch_first=True).to('cuda', dtype=torch.bfloat16)
+# Encode with fragmentation disabled (as done in scaffold_decoration)
+with sf.utils.attr_as(encoder, 'slicer', None):
+    encoded = encoder.encoder(scaffold_smiles, allow_empty=True)
 
-dump(q, "q"); dump(k, "k"); dump(v, "v")
-with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_mem_efficient=True, enable_math=True):
-    out, _ = mha(q, k, v, need_weights=False)
-print("OK, out:", out.shape)
+print(f'Original:  {scaffold_smiles}')  # O=c1[nH]cnc2nc([*])ccc12
+print(f'Encoded:   {encoded}')           # O=c1[nH]cnc2nc3ccc12  ← [*] became 3!
+print(f'Decoded:   {encoder.decoder(encoded, remove_dummies=False)}')  # O=c1[nH]cnc2nc([*:3])ccc12 
+
+from safe.utils import standardize_attach
+print(f'Decoded:   {standardize_attach(encoder.decoder(encoded, remove_dummies=False))}')

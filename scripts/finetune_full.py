@@ -15,6 +15,7 @@ import argparse
 import json
 import logging
 import os
+import random
 import re
 import sys
 from datetime import datetime
@@ -22,6 +23,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 import warnings
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -40,9 +42,28 @@ from omegaconf import OmegaConf
 # Add src to path for imports
 sys.path.append(str(Path(__file__).parent.parent / "src"))
 
-from models.modeling_novomolgen_backup import NovoMolGen, NovoMolGenConfig
+from models.modeling_novomolgen_infonce_112925 import NovoMolGen, NovoMolGenConfig
 from data_loader.molecule_data_module import MolDataModule
 from trainer.hf_trainer import HFTrainer, HFTrainingArguments
+
+
+def set_seed(seed: int):
+    """
+    Set random seed for reproducibility.
+    
+    Args:
+        seed: Random seed value
+    """
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)  # if you are using multi-GPU
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.enabled = False
 
 
 def setup_logging(log_dir: Path, log_level: str = "INFO") -> logging.Logger:
@@ -122,6 +143,20 @@ def create_model(config: Dict[str, Any], logger: logging.Logger) -> NovoMolGen:
     base_config.train_new_modules_only = config.get("train_new_modules_only", True)
     base_config.cond_tokens_len = config.get("cond_tokens_len", base_config.hidden_size)
     base_config.enable_lora = False  # LoRA applied externally
+
+    # Optional ablation controls (e.g., remove IFP information during training)
+    base_config.ablate_ifp = config.get("ablate_ifp", False)
+
+    # InfoNCE alignment configuration (optional)
+    if "infonce_weight" in config:
+        base_config.infonce_weight = float(config.get("infonce_weight", 0.0))
+    if "infonce_temperature" in config:
+        base_config.infonce_temperature = float(config.get("infonce_temperature", 0.2))
+    
+    # Ligand vector statistics for normalization (optional)
+    # if "ligand_vec_stats_path" in config:
+    #     base_config.ligand_vec_stats_path = config.get("ligand_vec_stats_path")
+    #     logger.info(f"Using ligand_vec_stats_path: {base_config.ligand_vec_stats_path}")
     
     # Apply KL annealing configuration if provided
     vae_config = config.get("vae", {})
@@ -927,6 +962,26 @@ class LossMonitoringCallback(TrainerCallback):
                             f"Step {state.global_step}: ℹ️  KL loss ({kl_loss_unscaled:.4f}) is very small ({kl_nll_ratio:.4f}x NLL). "
                             f"Consider increasing beta_kl (current: {beta:.4f}) if regularization is needed."
                         )
+
+        # Log InfoNCE loss and cosine statistics if available (for conditional alignment diagnostics)
+        if hasattr(actual_model, '_last_infonce_loss'):
+            logs['train/infonce_loss'] = actual_model._last_infonce_loss
+        if hasattr(actual_model, '_last_infonce_cos_mean'):
+            logs['train/infonce_cos_mean'] = actual_model._last_infonce_cos_mean
+        if hasattr(actual_model, '_last_infonce_cos_std'):
+            logs['train/infonce_cos_std'] = actual_model._last_infonce_cos_std
+
+        # Histogram of cosine similarities (q·k) for InfoNCE, if stored by the model
+        if hasattr(actual_model, '_last_infonce_cos_hist'):
+            try:
+                import wandb
+                cos_vals = actual_model._last_infonce_cos_hist
+                if isinstance(cos_vals, torch.Tensor):
+                    cos_vals = cos_vals.cpu().numpy()
+                logs['train/infonce_cos_hist'] = wandb.Histogram(cos_vals)
+            except Exception:
+                # 如果 wandb 不可用或出錯，就安靜跳過 histogram
+                pass
     
     def on_evaluate(self, args, state, control, model=None, logs=None, **kwargs):
         """Called after evaluation. Extract and log eval NLL and KL losses."""
@@ -1313,6 +1368,11 @@ def main():
     # Load configuration
     config = load_config(args.config)
     logger.info(f"Loaded config: {json.dumps(config, indent=2)}")
+    
+    # Set random seed for reproducibility
+    seed = config.get("seed", 42)
+    set_seed(seed)
+    logger.info(f"Random seed set to: {seed}")
     
     # Generate unique run name if not provided
     if args.run_name is None:

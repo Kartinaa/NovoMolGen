@@ -12,6 +12,9 @@ finetune_data/
 build/
 wandb/
 outputs/
+outputs_xdock/
+test_structureSAFE/
+flash-attention-v2/
 save*
 save/
 save_finetune/
