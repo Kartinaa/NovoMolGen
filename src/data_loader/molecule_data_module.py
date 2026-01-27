@@ -221,20 +221,26 @@ class MolDataModule:
             # Extract condition features before passing to base_collator
             # DataCollatorForLanguageModeling only expects token-related fields (input_ids, etc.)
             condition_feature_keys = ["pocket_vec", "evo_vec", "ifp", "ligand_vec"]
+            smiles_key = "mol_string"  # Key for preserving SMILES strings for Tanimoto loss
             condition_features = {}
-            
+
             if include_cond_features:
                 # Extract condition features from each feature dict
                 for key in condition_feature_keys:
                     if key in features[0]:
                         condition_features[key] = [f[key] for f in features]
-            
+
+            # Extract SMILES strings if available (for Tanimoto loss)
+            smiles_strings = None
+            if smiles_key in features[0]:
+                smiles_strings = [f[smiles_key] for f in features]
+
             # Create features dict with only token-related fields for base_collator
             token_features = []
             for f in features:
-                token_feature = {k: v for k, v in f.items() if k not in condition_feature_keys}
+                token_feature = {k: v for k, v in f.items() if k not in condition_feature_keys and k != smiles_key}
                 token_features.append(token_feature)
-            
+
             # Collate token-related features
             batch = base_collator(token_features)
             # Keep tensors on CPU - Trainer will move them to the correct device
@@ -293,6 +299,10 @@ class MolDataModule:
                     batch["evo_vec"] = torch.randn(B, 1280, dtype=torch.float32)    # ESM-2 evolutionary embedding
                     batch["ifp"] = torch.randn(B, 16384, dtype=torch.float32)      # Interaction fingerprint
                     batch["ligand_vec"] = torch.randn(B, 1536, dtype=torch.float32) # Ligand molecular representation
+
+            # Add SMILES strings to batch for Tanimoto loss (as list, not tensor)
+            if smiles_strings is not None:
+                batch["smiles_strings"] = smiles_strings
 
             return batch
 
@@ -404,13 +414,16 @@ class MolDataModule:
             add_special_tokens=True,
         )
         result = {"input_ids": outputs["input_ids"]}
-        
+
+        # Preserve original SMILES/SAFE string for Tanimoto loss
+        result["mol_string"] = element[mol_type]
+
         # Preserve condition features if they exist in the element
         condition_feature_keys = ["pocket_vec", "evo_vec", "ifp", "ligand_vec"]
         for key in condition_feature_keys:
             if key in element:
                 result[key] = element[key]
-        
+
         return result
 
     @staticmethod

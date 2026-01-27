@@ -1,0 +1,106 @@
+# BDNV2 Dataset Finetuning Configuration with Tanimoto Loss
+# This config enables Tanimoto loss for enforcing ligand conditioning
+# Tanimoto loss encourages molecules with similar fingerprints to have similar z vectors
+
+# Ablation
+ablate_ifp: false
+
+# Model configuration
+pretrained_path: "models/novomogen_300M_YB/checkpoint-309520"
+enable_cross_attn: true
+cross_layers: [3, 7, 11, 15, 19, 23, 27, 31] # Add cross-attention to these transformer layers
+train_new_modules_only: false  # Freeze base model, train only new modules
+enable_lora: false
+ligand_vec_stats_path: "finetune_data/processed_data/hf_bdnv2_dataset/ligand_stats.pt"
+lora_r: 8
+lora_alpha: 16
+lora_dropout: 0.05
+
+# Tanimoto loss configuration (replaces InfoNCE)
+tanimoto_weight: 0.1          # Weight for Tanimoto loss
+tanimoto_fp_radius: 2         # Morgan fingerprint radius
+tanimoto_fp_bits: 2048        # Number of bits in fingerprint
+
+# Disable InfoNCE (using Tanimoto instead)
+infonce_weight: 0.0
+infonce_temperature: 0.2
+
+# Data configuration (matching bdnv2.yaml)
+dataset_name: "finetune_data/crossdock_dataset/hf_dataset_crossdock/train"
+tokenizer_path: "./data/tokenizers/tokenizer_bpe_None_SAFE_500_0_0.1.json"
+mol_type: "SAFE"
+max_seq_length: 64  # Alias for max_length, used by MolDataModule
+num_proc: 8
+streaming: false
+validation_set_names: ["finetune_data/crossdock_dataset/hf_dataset_crossdock/validation"]
+filter_validation_set: false
+include_condition_features: true  # Enable condition features (pocket_vec, evo_vec, ifp, ligand_vec)
+latent_dim: 128
+device: "cuda"
+
+# Training configuration (based on pretrain config)
+# Precision and performance
+bf16: true
+bf16_full_eval: true  # Use bf16 for evaluation
+tf32: true  # Enable TensorFloat-32 for faster training on Ampere GPUs
+dataloader_drop_last: true  # Drop last incomplete batch
+dataloader_num_workers: 6  # Number of data loading workers
+dataloader_pin_memory: true  # Pin memory for faster GPU transfer
+do_train: true
+do_eval: true  # Enable evaluation during training
+evaluation_strategy: "steps"  # Evaluation strategy: "no", "steps", "epoch"
+eval_steps: 1000  # Evaluate every N steps
+optim: "adamw_torch"  # Optimizer type: "adamw_torch", "adamw_hf", etc.
+adam_beta1: 0.9  # Adam beta1 parameter
+adam_beta2: 0.95  # Adam beta2 parameter
+learning_rate: 5e-5  # Learning rate (lower for finetuning)
+weight_decay: 0.01  # Weight decay for regularization
+max_grad_norm: 5.0  # Gradient clipping threshold
+lr_scheduler_type: "cosine"  # LR scheduler: "linear", "cosine", "cosine_with_restarts", etc.
+warmup_ratio: 0.1  # Warmup ratio (10% of training for warmup)
+num_train_epochs: 50  # Number of training epochs
+gradient_accumulation_steps: 4  # Gradient accumulation steps
+gradient_checkpointing: false  # Enable gradient checkpointing to save memory
+per_device_train_batch_size: 250  # Batch size per device
+per_device_eval_batch_size: 228  # Evaluation batch size per device (must be <= validation set size)
+total_batch_size: 1000  # Total batch size = per_device_train_batch_size * gradient_accumulation_steps * num_gpus
+logging_steps: 10  # Log every N steps
+log_on_each_node: false  # Log on each node in distributed training
+save_strategy: "steps"  # Save strategy: "no", "steps", "epoch", "steps"
+save_steps: 500  # Save checkpoint every N steps
+save_total_limit: 15  # Maximum number of checkpoints to keep
+save_spec_steps: 12000 # Save special checkpoints every N steps
+save_safetensors: false  # Save in SafeTensors format
+push_spec_checkpoints: false  # Push special checkpoints to Hub
+repo_id: null  # HuggingFace Hub repository ID (set to null to disable)
+hub_private_repo: true  # Make Hub repository private
+hub_token: null  # HuggingFace Hub token (can be set via environment variable HF_TOKEN)
+torch_compile: false  # Enable torch.compile for faster training (PyTorch 2.0+)
+include_num_input_tokens_seen: true  # Include number of input tokens seen in training state
+remove_unused_columns: false  # Remove unused columns from dataset
+report_to: ["wandb"]  # Reporting integrations: ["wandb", "tensorboard", etc.]
+
+# Run configuration
+run_name: "bdnv2_300M_tanimoto_loss"  # Run name for logging and tracking
+
+# Logging
+wandb_logs: true  # Set to true if you want to use Weights & Biases
+
+# Random seed for reproducibility
+seed: 2025
+
+# === VAE / KL annealing configuration ===
+# KL divergence annealing configuration
+vae:
+  beta_kl_init: 0            # Initial KL weight (at training start)
+  beta_kl_final: 0.1         # Final KL weight (after annealing)
+  beta_kl_anneal_type: "linear"  # Annealing type: "linear", "cosine", "cyclical"
+  beta_kl_anneal_steps: 30000  # Annealing steps (30k steps from init to final)
+  beta_kl_eval: 1            # Fixed beta_kl for evaluation (if set)
+
+# === Progressive unfreezing configuration ===
+# Progressive unfreezing: gradually unfreeze top transformer layers during training
+progressive_unfreezing:
+  enabled: false  # Set to true to enable progressive unfreezing
+  layers_to_unfreeze: [11, 10, 9, 8, 7, 6, 5, 4]
+  unfreeze_steps: [1, 1, 1, 1, 1, 1, 1, 1]

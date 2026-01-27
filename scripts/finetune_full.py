@@ -42,7 +42,32 @@ from omegaconf import OmegaConf
 # Add src to path for imports
 sys.path.append(str(Path(__file__).parent.parent / "src"))
 
-from models.modeling_novomolgen_infonce_112925 import NovoMolGen, NovoMolGenConfig
+# Model import - will be done dynamically based on config
+# Default to infonce model, but will switch to tanimoto model if tanimoto_weight > 0
+NovoMolGen = None
+NovoMolGenConfig = None
+
+
+def _load_model_class(config: dict):
+    """Dynamically load the appropriate model class based on config."""
+    global NovoMolGen, NovoMolGenConfig
+
+    tanimoto_weight = config.get("tanimoto_weight", 0.0)
+
+    if tanimoto_weight > 0:
+        # Use Tanimoto model (supports both Tanimoto and InfoNCE losses)
+        from models.modeling_novomolgen_tanimoto import NovoMolGen as TanimotoModel
+        from models.modeling_novomolgen_tanimoto import NovoMolGenConfig as TanimotoConfig
+        NovoMolGen = TanimotoModel
+        NovoMolGenConfig = TanimotoConfig
+        print("Using Tanimoto model (tanimoto_weight > 0)")
+    else:
+        # Use InfoNCE model (original model)
+        from models.modeling_novomolgen_infonce_112925 import NovoMolGen as InfoNCEModel
+        from models.modeling_novomolgen_infonce_112925 import NovoMolGenConfig as InfoNCEConfig
+        NovoMolGen = InfoNCEModel
+        NovoMolGenConfig = InfoNCEConfig
+        print("Using InfoNCE model (tanimoto_weight = 0)")
 from data_loader.molecule_data_module import MolDataModule
 from trainer.hf_trainer import HFTrainer, HFTrainingArguments
 
@@ -152,6 +177,15 @@ def create_model(config: Dict[str, Any], logger: logging.Logger) -> NovoMolGen:
         base_config.infonce_weight = float(config.get("infonce_weight", 0.0))
     if "infonce_temperature" in config:
         base_config.infonce_temperature = float(config.get("infonce_temperature", 0.2))
+
+    # Tanimoto loss configuration (optional)
+    if "tanimoto_weight" in config:
+        base_config.tanimoto_weight = float(config.get("tanimoto_weight", 0.0))
+        logger.info(f"Tanimoto loss weight: {base_config.tanimoto_weight}")
+    if "tanimoto_fp_radius" in config:
+        base_config.tanimoto_fp_radius = int(config.get("tanimoto_fp_radius", 2))
+    if "tanimoto_fp_bits" in config:
+        base_config.tanimoto_fp_bits = int(config.get("tanimoto_fp_bits", 2048))
     
     # Ligand vector statistics for normalization (optional)
     # if "ligand_vec_stats_path" in config:
@@ -971,6 +1005,10 @@ class LossMonitoringCallback(TrainerCallback):
         if hasattr(actual_model, '_last_infonce_cos_std'):
             logs['train/infonce_cos_std'] = actual_model._last_infonce_cos_std
 
+        # Log Tanimoto loss if available (for ligand conditioning enforcement)
+        if hasattr(actual_model, '_last_tanimoto_loss'):
+            logs['train/tanimoto_loss'] = actual_model._last_tanimoto_loss
+
         # Histogram of cosine similarities (q·k) for InfoNCE, if stored by the model
         if hasattr(actual_model, '_last_infonce_cos_hist'):
             try:
@@ -1368,7 +1406,10 @@ def main():
     # Load configuration
     config = load_config(args.config)
     logger.info(f"Loaded config: {json.dumps(config, indent=2)}")
-    
+
+    # Load appropriate model class based on config (tanimoto vs infonce)
+    _load_model_class(config)
+
     # Set random seed for reproducibility
     seed = config.get("seed", 42)
     set_seed(seed)
