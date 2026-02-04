@@ -14,13 +14,14 @@ from pathlib import Path
 from typing import Tuple
 
 import torch
+import pyarrow as pa
 from datasets import load_from_disk
 
 # 把 src 加到路径，方便导入模型（与其它脚本保持一致）
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT / "src"))
 
-from models.modeling_novomolgen_infonce_depot import NovoMolGen, NovoMolGenConfig  # type: ignore
+from models.modeling_novomolgen_tanimoto import NovoMolGen, NovoMolGenConfig  # type: ignore
 
 
 def setup_logging(log_level: str = "INFO") -> logging.Logger:
@@ -158,20 +159,40 @@ def inspect_mu(
     logger.info("=" * 60)
     logger.info(f"Validation set path: {validation_path}")
 
-    ds = load_from_disk(str(val_path))
-    n = len(ds)
-    logger.info(f"Loaded validation set with {n} samples")
+    # Try to load dataset - first with PyArrow (for problematic datasets), then with load_from_disk
+    data = None
+    try:
+        # Try PyArrow streaming format first (handles HF datasets metadata issues)
+        arrow_files = list(val_path.glob("*.arrow"))
+        if arrow_files:
+            with pa.memory_map(str(arrow_files[0]), 'r') as source:
+                table = pa.ipc.open_stream(source).read_all()
+            data = {col: table.column(col).to_pylist() for col in table.column_names}
+            n = table.num_rows
+            logger.info(f"Loaded validation set via PyArrow: {n} samples")
+    except Exception as e:
+        logger.debug(f"PyArrow loading failed: {e}, trying load_from_disk...")
+
+    if data is None:
+        try:
+            ds = load_from_disk(str(val_path))
+            n = len(ds)
+            # Convert to dict format for consistent handling
+            data = {key: [ds[i][key] for i in range(n)] for key in ds[0].keys()}
+            logger.info(f"Loaded validation set via load_from_disk: {n} samples")
+        except Exception as e:
+            logger.error(f"Failed to load dataset: {e}")
+            return
 
     if n == 0:
         logger.warning("Validation set is empty, skipping mu inspection.")
         return
 
-    sample = ds[0]
     required_keys = ["ifp", "ligand_vec"]
-    if not all(k in sample for k in required_keys):
+    if not all(k in data for k in required_keys):
         logger.error(
-            f"Validation sample does not contain required keys {required_keys}. "
-            f"Available keys: {list(sample.keys())}"
+            f"Validation data does not contain required keys {required_keys}. "
+            f"Available keys: {list(data.keys())}"
         )
         return
 
@@ -194,10 +215,9 @@ def inspect_mu(
     with torch.no_grad():
         for start in range(0, total_samples, batch_size):
             end = min(start + batch_size, total_samples)
-            batch = ds.select(range(start, end))
-
-            ifp = torch.tensor(batch["ifp"], dtype=torch.float32, device=device).to(model_dtype)
-            ligand_vec = torch.tensor(batch["ligand_vec"], dtype=torch.float32, device=device).to(model_dtype)
+            # Use data dict directly instead of ds.select()
+            ifp = torch.tensor(data["ifp"][start:end], dtype=torch.float32, device=device).to(model_dtype)
+            ligand_vec = torch.tensor(data["ligand_vec"][start:end], dtype=torch.float32, device=device).to(model_dtype)
 
             mu, sigma, logvar = model.ligand_encoder(ifp, ligand_vec, return_logvar=True)
             mu_cpu = mu.detach().cpu()

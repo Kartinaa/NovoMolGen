@@ -1,6 +1,7 @@
 # BDNV2 Dataset Finetuning Configuration with Tanimoto Loss
 # This config enables Tanimoto loss for enforcing ligand conditioning
-# Tanimoto loss encourages molecules with similar fingerprints to have similar z vectors
+# Tanimoto loss encourages molecules with similar fingerprints to have similar mu vectors
+# Using mu (deterministic encoder output) provides cleaner training signal than z (sampled)
 
 # Ablation
 ablate_ifp: false
@@ -20,6 +21,7 @@ lora_dropout: 0.05
 tanimoto_weight: 0.1          # Weight for Tanimoto loss
 tanimoto_fp_radius: 2         # Morgan fingerprint radius
 tanimoto_fp_bits: 2048        # Number of bits in fingerprint
+tanimoto_use_mu: true         # Use mu (encoder mean) instead of z (sampled) for cleaner signal
 
 # Disable InfoNCE (using Tanimoto instead)
 infonce_weight: 0.0

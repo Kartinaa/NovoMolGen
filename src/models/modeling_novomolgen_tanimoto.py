@@ -122,12 +122,13 @@ def compute_tanimoto_matrix(smiles_list: List[str], radius: int = 2, n_bits: int
     return T, valid_mask
 
 
-def compute_euclidean_distance_matrix(z: torch.Tensor) -> torch.Tensor:
+def compute_euclidean_distance_matrix(z: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     """
     Compute pairwise Euclidean distance matrix for z vectors.
 
     Args:
         z: Latent vectors [B, z_dim]
+        eps: Small value added before sqrt to avoid gradient issues
 
     Returns:
         Distance matrix [B, B]
@@ -137,7 +138,8 @@ def compute_euclidean_distance_matrix(z: torch.Tensor) -> torch.Tensor:
     z_norm_sq = (z ** 2).sum(dim=-1, keepdim=True)  # [B, 1]
     dist_sq = z_norm_sq + z_norm_sq.t() - 2 * torch.mm(z, z.t())  # [B, B]
     # Clamp to avoid negative values due to numerical errors
-    dist_sq = torch.clamp(dist_sq, min=0.0)
+    # Use eps to avoid sqrt(0) which has infinite gradient
+    dist_sq = torch.clamp(dist_sq, min=eps)
     dist = torch.sqrt(dist_sq)
     return dist
 
@@ -216,6 +218,183 @@ def compute_tanimoto_loss(
     # When rho = -1 (high similarity <-> low distance), loss = 0
     # When rho = 1 (high similarity <-> high distance), loss = 2
     # When rho = 0 (no correlation), loss = 1
+    loss = 1.0 + rho
+
+    return loss
+
+
+def compute_tanimoto_from_fingerprints(fps: torch.Tensor) -> torch.Tensor:
+    """
+    Compute Tanimoto similarity matrix from binary fingerprint tensors.
+
+    Tanimoto(A, B) = |A ∩ B| / |A ∪ B| = (A · B) / (|A| + |B| - A · B)
+
+    Args:
+        fps: Binary fingerprint tensor [B, n_bits]
+
+    Returns:
+        Tanimoto similarity matrix [B, B]
+    """
+    # Compute dot products (intersection counts)
+    intersection = torch.mm(fps, fps.t())  # [B, B]
+
+    # Compute bit counts for each fingerprint
+    bit_counts = fps.sum(dim=1, keepdim=True)  # [B, 1]
+
+    # Union = |A| + |B| - intersection
+    union = bit_counts + bit_counts.t() - intersection  # [B, B]
+
+    # Tanimoto = intersection / union (avoid division by zero)
+    tanimoto = intersection / (union + 1e-8)
+
+    return tanimoto
+
+
+def compute_tanimoto_loss_from_fps(
+    z: torch.Tensor,
+    morgan_fp: torch.Tensor,
+    valid_mask: torch.Tensor,
+    eps: float = 1e-8,
+    debug: bool = False
+) -> torch.Tensor:
+    """
+    Compute Tanimoto loss using pre-computed Morgan fingerprints.
+
+    Args:
+        z: Latent vectors [B, z_dim]
+        morgan_fp: Morgan fingerprints [B, n_bits]
+        valid_mask: Boolean mask indicating valid molecules [B]
+        eps: Small value for numerical stability
+        debug: Print debug information
+
+    Returns:
+        Scalar loss tensor
+    """
+    B = z.size(0)
+    device = z.device
+
+    if B < 2:
+        return torch.tensor(0.0, device=device, requires_grad=True)
+
+    # Compute Tanimoto similarity matrix from fingerprints
+    T = compute_tanimoto_from_fingerprints(morgan_fp.to(device))
+    if debug:
+        print(f"[Tanimoto Debug] T has NaN: {torch.isnan(T).any().item()}, min/max: {T.min().item():.4f}/{T.max().item():.4f}")
+
+    # Compute Euclidean distance matrix D [B, B]
+    D = compute_euclidean_distance_matrix(z)
+    if debug:
+        print(f"[Tanimoto Debug] D has NaN: {torch.isnan(D).any().item()}, min/max: {D.min().item():.4f}/{D.max().item():.4f}")
+
+    # Extract upper triangular entries (exclude diagonal)
+    triu_idx = torch.triu_indices(B, B, offset=1, device=device)
+    T_upper = T[triu_idx[0], triu_idx[1]]
+    D_upper = D[triu_idx[0], triu_idx[1]]
+
+    # Filter valid pairs (both molecules must be valid)
+    valid_mask = valid_mask.to(device)
+    pair_valid = valid_mask[triu_idx[0]] & valid_mask[triu_idx[1]]
+    T_valid = T_upper[pair_valid]
+    D_valid = D_upper[pair_valid]
+
+    if debug:
+        print(f"[Tanimoto Debug] T_valid count: {T_valid.numel()}, D_valid count: {D_valid.numel()}")
+
+    if T_valid.numel() < 2:
+        return torch.tensor(0.0, device=device, requires_grad=True)
+
+    # Pearson correlation
+    T_centered = T_valid - T_valid.mean()
+    D_centered = D_valid - D_valid.mean()
+
+    T_var = (T_centered ** 2).sum()
+    D_var = (D_centered ** 2).sum()
+
+    if debug:
+        print(f"[Tanimoto Debug] T_var: {T_var.item():.6f}, D_var: {D_var.item():.6f}")
+
+    # Handle degenerate cases where variance is near zero
+    # This can happen if all z vectors are identical (D_var ≈ 0) or all molecules have same similarity (T_var ≈ 0)
+    min_var = 1e-6
+    if T_var < min_var or D_var < min_var:
+        if debug:
+            print(f"[Tanimoto Debug] Degenerate case: T_var={T_var.item():.8f}, D_var={D_var.item():.8f}, returning 0 loss")
+        return torch.tensor(0.0, device=device, requires_grad=True)
+
+    numerator = (T_centered * D_centered).sum()
+    denominator = torch.sqrt(T_var * D_var + eps)
+    rho = numerator / denominator
+
+    if debug:
+        print(f"[Tanimoto Debug] numerator: {numerator.item():.6f}, denominator: {denominator.item():.6f}, rho: {rho.item():.6f}")
+
+    # Loss = 1 + rho (0 when perfectly anti-correlated)
+    loss = 1.0 + rho
+    if debug:
+        print(f"[Tanimoto Debug] Final loss: {loss.item():.6f}")
+
+    return loss
+
+
+def compute_tanimoto_loss_from_matrix(
+    z: torch.Tensor,
+    tanimoto_matrix: torch.Tensor,
+    valid_mask: torch.Tensor,
+    eps: float = 1e-8
+) -> torch.Tensor:
+    """
+    Compute Tanimoto loss using a pre-computed Tanimoto similarity matrix.
+
+    This is more efficient when the Tanimoto matrix is computed in the data loader
+    (avoids recomputing fingerprints in the model forward pass).
+
+    Args:
+        z: Latent vectors [B, z_dim]
+        tanimoto_matrix: Pre-computed Tanimoto similarity matrix [B, B]
+        valid_mask: Boolean mask indicating valid molecules [B]
+        eps: Small value for numerical stability
+
+    Returns:
+        Scalar loss tensor
+    """
+    B = z.size(0)
+    device = z.device
+
+    # Return 0 loss for batch_size < 2 (no pairs to compare)
+    if B < 2:
+        return torch.tensor(0.0, device=device, requires_grad=True)
+
+    # Move inputs to same device as z
+    T = tanimoto_matrix.to(device)
+    valid_mask = valid_mask.to(device)
+
+    # Compute Euclidean distance matrix D [B, B]
+    D = compute_euclidean_distance_matrix(z)
+
+    # Extract upper triangular entries (exclude diagonal)
+    triu_idx = torch.triu_indices(B, B, offset=1, device=device)
+    T_upper = T[triu_idx[0], triu_idx[1]]
+    D_upper = D[triu_idx[0], triu_idx[1]]
+
+    # Filter valid pairs (both molecules in the pair must be valid)
+    pair_valid = valid_mask[triu_idx[0]] & valid_mask[triu_idx[1]]
+    T_valid = T_upper[pair_valid]
+    D_valid = D_upper[pair_valid]
+
+    # Return 0 loss if fewer than 2 valid pairs
+    if T_valid.numel() < 2:
+        return torch.tensor(0.0, device=device, requires_grad=True)
+
+    # Compute Pearson correlation between Tanimoto similarities and Euclidean distances
+    T_centered = T_valid - T_valid.mean()
+    D_centered = D_valid - D_valid.mean()
+
+    # rho = sum(T_centered * D_centered) / sqrt(sum(T_centered^2) * sum(D_centered^2))
+    numerator = (T_centered * D_centered).sum()
+    denominator = torch.sqrt((T_centered ** 2).sum() * (D_centered ** 2).sum() + eps)
+    rho = numerator / denominator
+
+    # Loss = 1 + rho
     loss = 1.0 + rho
 
     return loss
@@ -413,13 +592,17 @@ class NovoMolGenConfig(LlamaConfig):
                  enable_cross_attn: bool = False,
                  cross_layers: Optional[List[int]] = None,
                  cond_tokens_len: int = 512,
+                 # InfoNCE alignment between last-layer hidden states and ligand_vec
+                 infonce_weight: float = 0.0,
+                 infonce_temperature: float = 0.2,
                  # Tanimoto loss parameters
                  tanimoto_weight: float = 0.0,
                  tanimoto_fp_radius: int = 2,
                  tanimoto_fp_bits: int = 2048,
+                 tanimoto_use_mu: bool = True,  # If True, use mu for Tanimoto loss; if False, use z
+                 # Ablation controls
+                 ablate_ifp: bool = False,
                  # Finetune / LoRA controls
-                 infonce_weight: float = 0.0,
-                 infonce_temperature: float = 0.2,
                  train_new_modules_only: bool = True,
                  enable_lora: bool = False,
                  lora_r: int = 16,
@@ -447,13 +630,17 @@ class NovoMolGenConfig(LlamaConfig):
         self.enable_cross_attn = enable_cross_attn
         self.cross_layers = cross_layers if cross_layers is not None else []
         self.cond_tokens_len = int(cond_tokens_len)
+        # InfoNCE controls
+        self.infonce_weight = float(infonce_weight)
+        self.infonce_temperature = float(infonce_temperature)
         # Tanimoto loss parameters
         self.tanimoto_weight = float(tanimoto_weight)
         self.tanimoto_fp_radius = int(tanimoto_fp_radius)
         self.tanimoto_fp_bits = int(tanimoto_fp_bits)
+        self.tanimoto_use_mu = bool(tanimoto_use_mu)  # Use mu instead of z for Tanimoto loss
+        # Ablation controls
+        self.ablate_ifp = bool(ablate_ifp)
         # Finetune / LoRA controls (defaults are safe no-op unless toggled)
-        self.infonce_weight = float(infonce_weight)
-        self.infonce_temperature = float(infonce_temperature)
         self.train_new_modules_only = bool(train_new_modules_only)
         self.enable_lora = bool(enable_lora)
         self.lora_r = int(lora_r)
@@ -693,12 +880,14 @@ class NovoMolGen(GPTLMHeadModel):
             # Projection to convert a condition vector of length Lc to tokens [B, Lc, d]
             # We simply lift each scalar to the model hidden size with a linear layer.
             hidden_size = config.n_embd if hasattr(config, 'n_embd') else config.hidden_size
-            self.cond_proj = nn.Linear(1, hidden_size, bias=False)
 
             # Initialize encoders with proper dimensions for the new architecture
             from .condition import create_ligand_encoder, create_protein_encoder, create_condition_fusion
             cond_latent_dim = self.base_config.cond_tokens_len  # z/2 as specified
             print(f"cond_latent_dim: {cond_latent_dim}")
+
+            # Initialize condition projection
+            self.cond_proj = nn.Parameter(torch.randn(cond_latent_dim, hidden_size) * 0.02)
 
             # Ligand encoder: takes ifp [B, 16384] and ligand_vec [B, 1536], outputs mu/logvar [B, z_dim]
             self.ligand_encoder = create_ligand_encoder(
@@ -1019,8 +1208,8 @@ class NovoMolGen(GPTLMHeadModel):
                 evo_vec: Optional[torch.Tensor] = None,
                 ifp: Optional[torch.Tensor] = None,
                 ligand_vec: Optional[torch.Tensor] = None,
-                # SMILES strings for Tanimoto loss
-                smiles_strings: Optional[List[str]] = None,
+                # Pre-computed Morgan fingerprints for Tanimoto loss
+                morgan_fp: Optional[torch.Tensor] = None,
                 **loss_kwargs):
         """
                 input_ids: (batch, seqlen) int tensor
@@ -1029,7 +1218,6 @@ class NovoMolGen(GPTLMHeadModel):
                 num_last_tokens: if > 0, only return the logits for the last n tokens
                 cond_tokens: (batch, cond_len, hidden_size) tensor for cross-attention
                 cond_attention_mask: (batch, cond_len) tensor for condition masking
-                smiles_strings: list of SMILES strings for Tanimoto loss computation
                 """
         assert (
                 input_ids.ndim == 2
@@ -1058,7 +1246,11 @@ class NovoMolGen(GPTLMHeadModel):
                 raise ValueError("No protein condition provided, breaking the training loop")
 
             # Process ligand condition: ifp + ligand_vec -> mu, logvar, then sample z
+            mu = None  # Initialize mu for later use in Tanimoto loss
             if ifp is not None and ligand_vec is not None:
+                # Optional ablation: remove IFP information by zeroing it out
+                if getattr(self.base_config, "ablate_ifp", False):
+                    ifp = torch.zeros_like(ifp)
                 mu, sigma, logvar = self.ligand_encoder(ifp, ligand_vec, return_logvar=True)
                 # Sample z from posterior using reparameterization trick
                 eps = torch.randn_like(mu)
@@ -1075,7 +1267,7 @@ class NovoMolGen(GPTLMHeadModel):
             # Project to cond_tokens: [B, Lc, d] where Lc = cond_tokens_len
             # cond_vector = torch.cat([protein_condition, fused_condition], dim=-1)  # [B, 2*dz]
             cond_vector = fused_condition
-            cond_tokens = self.cond_proj(cond_vector.unsqueeze(-1))  # [B, Lc (2*dz), d]
+            cond_tokens = cond_vector.unsqueeze(-1) * self.cond_proj.unsqueeze(0)  # [B, Lc (2*dz), d]
             cond_attention_mask = torch.zeros(cond_tokens.size(0), cond_tokens.size(1), dtype=torch.bool, device=device)
 
         # Build args for calling the underlying transformer. Only pass cross-attention
@@ -1114,23 +1306,62 @@ class NovoMolGen(GPTLMHeadModel):
             lm_logits = F.linear(hidden_states, lm_head_weight, bias=self.lm_head.bias)
 
         # Tanimoto loss to align z vectors with molecular similarity
+        # Uses pre-computed Morgan fingerprints passed from data loader
+        # Invalid molecules are filtered during tokenization, so all fingerprints are valid
         tanimoto_loss = None
         tanimoto_weight = getattr(self.base_config, "tanimoto_weight", 0.0)
-        if (
-            self.training
-            and tanimoto_weight > 0.0
-            and smiles_strings is not None
-            and len(smiles_strings) > 1
-            and z is not None
-        ):
-            fp_radius = getattr(self.base_config, "tanimoto_fp_radius", 2)
-            fp_bits = getattr(self.base_config, "tanimoto_fp_bits", 2048)
-            tanimoto_loss = compute_tanimoto_loss(
-                z=z,
-                smiles_list=smiles_strings,
-                fp_radius=fp_radius,
-                fp_bits=fp_bits
-            )
+
+        # DEBUG: Check for NaN in intermediate values BEFORE Tanimoto computation
+        if self.training and not hasattr(self, '_debug_nan_check_done'):
+            print(f"[NaN Debug] morgan_fp in forward: {morgan_fp is not None}")
+            print(f"[NaN Debug] z has NaN: {torch.isnan(z).any().item() if z is not None else 'z is None'}")
+            print(f"[NaN Debug] hidden_states has NaN: {torch.isnan(hidden_states).any().item()}")
+            print(f"[NaN Debug] lm_logits has NaN: {torch.isnan(lm_logits).any().item()}")
+            print(f"[NaN Debug] tanimoto_weight: {tanimoto_weight}")
+            if morgan_fp is not None:
+                print(f"[NaN Debug] morgan_fp has NaN: {torch.isnan(morgan_fp).any().item()}")
+                print(f"[NaN Debug] morgan_fp dtype: {morgan_fp.dtype}, device: {morgan_fp.device}")
+            self._debug_nan_check_done = True
+
+        # Tanimoto loss: align molecular similarity with latent space distance
+        # Use mu (deterministic encoder output) instead of z (sampled) for cleaner training signal
+        tanimoto_use_mu = getattr(self.base_config, "tanimoto_use_mu", True)
+        # Use mu if available and configured, otherwise fall back to z
+        tanimoto_target = mu if (tanimoto_use_mu and mu is not None) else z
+
+        if self.training and tanimoto_weight > 0.0 and tanimoto_target is not None:
+            # Debug output (only once)
+            debug_this_step = not hasattr(self, '_debug_tanimoto_printed')
+            if debug_this_step:
+                if morgan_fp is None:
+                    print(f"[Model Debug] No morgan_fp available")
+                else:
+                    target_name = "mu" if tanimoto_use_mu else "z"
+                    print(f"[Model Debug] Got morgan_fp shape={morgan_fp.shape}, {target_name}.size(0)={tanimoto_target.size(0)}")
+                    print(f"[Model Debug] Using {target_name} for Tanimoto loss (tanimoto_use_mu={tanimoto_use_mu})")
+                self._debug_tanimoto_printed = True
+
+            if morgan_fp is not None and morgan_fp.size(0) == tanimoto_target.size(0):
+                # All molecules have valid fingerprints (invalid ones filtered during tokenization)
+                valid_mask = torch.ones(tanimoto_target.size(0), dtype=torch.bool, device=tanimoto_target.device)
+                tanimoto_loss = compute_tanimoto_loss_from_fps(
+                    z=tanimoto_target,  # Pass mu or z based on config
+                    morgan_fp=morgan_fp,
+                    valid_mask=valid_mask,
+                    debug=debug_this_step,  # Debug on first call only
+                )
+
+                # Always check for NaN in tanimoto_loss and debug if found
+                if torch.isnan(tanimoto_loss).any():
+                    target_name = "mu" if tanimoto_use_mu else "z"
+                    print(f"[NaN DETECTED] tanimoto_loss is NaN!")
+                    print(f"[NaN DETECTED] {target_name} has NaN: {torch.isnan(tanimoto_target).any().item()}")
+                    print(f"[NaN DETECTED] {target_name} stats: min={tanimoto_target.min().item():.4f}, max={tanimoto_target.max().item():.4f}, mean={tanimoto_target.mean().item():.4f}")
+                    print(f"[NaN DETECTED] morgan_fp has NaN: {torch.isnan(morgan_fp).any().item()}")
+                    # Re-compute with debug to see where NaN came from
+                    _ = compute_tanimoto_loss_from_fps(z=tanimoto_target, morgan_fp=morgan_fp, valid_mask=valid_mask, debug=True)
+                    # Replace NaN with 0 to prevent corrupting total loss
+                    tanimoto_loss = torch.tensor(0.0, device=tanimoto_target.device, requires_grad=True)
 
         # InfoNCE loss to align last-layer hidden embedding with ligand_vec (optional)
         infonce_loss = None
@@ -1179,15 +1410,25 @@ class NovoMolGen(GPTLMHeadModel):
         # Compute KL(q_phi || N(0, I)) from ligand encoder if condition features are provided
         kl_loss = None
         if ifp is not None and ligand_vec is not None and hasattr(self, 'ligand_encoder'):
+            # Optional ablation: remove IFP information by zeroing it out
+            if getattr(self.base_config, "ablate_ifp", False):
+                ifp = torch.zeros_like(ifp)
+
             # Use KL from the ligand encoder's posterior
             mu, sigma, logvar = self.ligand_encoder(ifp, ligand_vec, return_logvar=True)
             kl_per_dim= 0.5 * (logvar.exp() + mu.pow(2) - 1.0 - logvar)
 
-            # fb = getattr(self, "free_bits", 0.5)
-            # if fb and fb > 0:
-            #     kl_per_dim = torch.clamp(kl_per_dim, min=fb)
+            # === Free-bits hinge loss: Sum-then-Threshold ===
+            # Sum over latent dimensions [B, D] -> [B]
+            kl_sample = kl_per_dim.sum(dim=-1)
 
-            kl_loss = kl_per_dim.sum(dim=-1).mean()  # Average per sample (sum over latent_dim)
+            # Free-bits threshold (2.0 to 5.0 is typical for the entire vector)
+            fb = 5.0
+
+            # Hinge Loss: only values above fb produce gradient
+            kl_hinge = torch.max(kl_sample, torch.tensor(fb, device=kl_sample.device))
+
+            kl_loss = kl_hinge.mean()
 
             # Normalize KL loss to per-token scale (to match NLL loss normalization)
             # This ensures KL loss and NLL loss have similar scales
@@ -1472,7 +1713,7 @@ class NovoMolGen(GPTLMHeadModel):
             # Build condition tokens
             # cond_vector = torch.cat([z, fused_condition], dim=-1)  # [B, 2*dz]
             cond_vector = fused_condition
-            new_cond_tokens = self.cond_proj(cond_vector.unsqueeze(-1))  # [B, 2*dz, d]
+            new_cond_tokens = cond_vector.unsqueeze(-1) * self.cond_proj.unsqueeze(0)  # [B, 2*dz, d]
             # Ensure cond_tokens have correct dtype for cross-attention (critical for flash_attn)
             new_cond_tokens = new_cond_tokens.to(model_dtype)
             new_cond_mask = torch.zeros(bsz, new_cond_tokens.size(1), dtype=torch.bool, device=device)
@@ -1485,7 +1726,8 @@ class NovoMolGen(GPTLMHeadModel):
             cond_latent_dim = self.base_config.cond_tokens_len
             z = torch.randn(bsz, cond_latent_dim, dtype=model_dtype, device=device)
             fused_condition = self.condition_fusion(protein_condition, z)
-            new_cond_tokens = self.cond_proj(fused_condition.unsqueeze(-1))  # [B, dz, d]
+            cond_vector = fused_condition
+            new_cond_tokens = cond_vector.unsqueeze(-1) * self.cond_proj.unsqueeze(0)  # [B, dz, d]
             # Ensure cond_tokens have correct dtype for cross-attention
             new_cond_tokens = new_cond_tokens.to(model_dtype)
             new_cond_mask = torch.zeros(bsz, new_cond_tokens.size(1), dtype=torch.bool, device=device)
@@ -1502,7 +1744,7 @@ class NovoMolGen(GPTLMHeadModel):
             # Build condition tokens
             # cond_vector = torch.cat([protein_condition, fused_condition], dim=-1)  # [B, 2*dz]
             cond_vector = fused_condition
-            new_cond_tokens = self.cond_proj(cond_vector.unsqueeze(-1))  # [B, 2*dz, d]
+            new_cond_tokens = cond_vector.unsqueeze(-1) * self.cond_proj.unsqueeze(0)  # [B, 2*dz, d]
             new_cond_mask = torch.zeros(bsz, new_cond_tokens.size(1), dtype=torch.bool, device=device)
 
         # Merge with existing condition tokens if provided
