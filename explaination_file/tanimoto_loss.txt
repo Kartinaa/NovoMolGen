@@ -1,0 +1,1 @@
+Given a batch of N molecules, let T denote the N × N Tanimoto similarity matrix where Tij = Tanimoto(moli, molj) and D denote the N×N Euclidean distance matrix where Dij = ∥zi − zj∥ where zi is the latent embedding of molecule i, then the Tanimoto loss LTanimoto is defined as the correlation between the upper triangular values of the two matrices, shifted by 1 to be positive :

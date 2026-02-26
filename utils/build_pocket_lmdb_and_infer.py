@@ -9,7 +9,7 @@ Usage examples:
     --job-name my_pocket \
     --dict-file /abs/path/to/unimol/example_data/pocket/dict_coarse.txt \
     --weights /abs/path/to/unimol/notebooks/pocket_pre_220816.pt \
-    --radius 6.0 \
+    --radius 10.0 \
     --batch-size 16
 
 Notes:
@@ -26,7 +26,6 @@ import lmdb
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
-from biopandas.pdb import PandasPdb
 import subprocess
 import glob
 from scipy.spatial import cKDTree
@@ -41,12 +40,93 @@ def normalize_atom_name(atom_name: str) -> str:
     return re.sub("\d+", "", atom_name)
 
 
-def extract_pocket_from_pdb(pdb_path: str, radius: float, include_waters: bool = False, exclude_h: bool = False) -> bytes:
-    pmol = PandasPdb().read_pdb(pdb_path)
+def _parse_pdb_atoms(pdb_path: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    解析PDB文件中的ATOM和HETATM记录，返回两个DataFrame。
+    
+    Args:
+        pdb_path: PDB文件路径
+    
+    Returns:
+        tuple: (atom_df, het_df) 包含ATOM和HETATM记录的DataFrame
+    """
+    atoms = []
+    hetatms = []
+    with open(pdb_path, 'r') as f:
+        for line in f:
+            if line.startswith('ATOM  '):
+                record_type = line[0:6].strip()
+                atom_serial = int(line[6:11].strip())
+                atom_name = line[12:16].strip()
+                alt_loc = line[16:17].strip() if len(line) > 16 else ' '
+                res_name = line[17:20].strip()
+                chain_id = line[21:22].strip() if len(line) > 21 else ' '
+                res_seq = int(line[22:26].strip())
+                i_code = line[26:27].strip() if len(line) > 26 else ' '
+                x = float(line[30:38].strip())
+                y = float(line[38:46].strip())
+                z = float(line[46:54].strip())
+                occupancy = float(line[54:60].strip()) if len(line) > 54 and line[54:60].strip() else 1.0
+                temp_factor = float(line[60:66].strip()) if len(line) > 60 and line[60:66].strip() else 0.0
+                element = line[76:78].strip() if len(line) > 76 and line[76:78].strip() else (atom_name[0] if atom_name else '')
+                
+                atoms.append({
+                    'record_type': record_type,
+                    'atom_serial': atom_serial,
+                    'atom_name': atom_name,
+                    'alt_loc': alt_loc,
+                    'residue_name': res_name,
+                    'chain_id': chain_id,
+                    'residue_number': res_seq,
+                    'insertion': i_code,
+                    'x_coord': x,
+                    'y_coord': y,
+                    'z_coord': z,
+                    'occupancy': occupancy,
+                    'temp_factor': temp_factor,
+                    'element_symbol': element,
+                })
+            elif line.startswith('HETATM'):
+                record_type = line[0:6].strip()
+                atom_serial = int(line[6:11].strip())
+                atom_name = line[12:16].strip()
+                alt_loc = line[16:17].strip() if len(line) > 16 else ' '
+                res_name = line[17:20].strip()
+                chain_id = line[21:22].strip() if len(line) > 21 else ' '
+                res_seq = int(line[22:26].strip())
+                i_code = line[26:27].strip() if len(line) > 26 else ' '
+                x = float(line[30:38].strip())
+                y = float(line[38:46].strip())
+                z = float(line[46:54].strip())
+                occupancy = float(line[54:60].strip()) if len(line) > 54 and line[54:60].strip() else 1.0
+                temp_factor = float(line[60:66].strip()) if len(line) > 60 and line[60:66].strip() else 0.0
+                element = line[76:78].strip() if len(line) > 76 and line[76:78].strip() else (atom_name[0] if atom_name else '')
+                
+                hetatms.append({
+                    'record_type': record_type,
+                    'atom_serial': atom_serial,
+                    'atom_name': atom_name,
+                    'alt_loc': alt_loc,
+                    'residue_name': res_name,
+                    'chain_id': chain_id,
+                    'residue_number': res_seq,
+                    'insertion': i_code,
+                    'x_coord': x,
+                    'y_coord': y,
+                    'z_coord': z,
+                    'occupancy': occupancy,
+                    'temp_factor': temp_factor,
+                    'element_symbol': element,
+                })
+    
+    atom_df = pd.DataFrame(atoms) if atoms else pd.DataFrame()
+    het_df = pd.DataFrame(hetatms) if hetatms else pd.DataFrame()
+    return atom_df, het_df
 
-    # Basic frames
-    atom_df = pmol.df["ATOM"].copy()
-    het_df = pmol.df["HETATM"].copy()
+
+def extract_pocket_from_pdb(pdb_path: str, radius: float, include_waters: bool = False, exclude_h: bool = False) -> bytes:
+    # Parse PDB file
+    atom_df, het_df = _parse_pdb_atoms(pdb_path)
 
     if (atom_df is None or atom_df.empty) and (het_df is None or het_df.empty):
         raise ValueError(f"No ATOM/HETATM records parsed from PDB: {pdb_path}")
@@ -223,7 +303,25 @@ def run_unimol_pocket_infer(data_dir: str, job_name: str, dict_file: str, weight
         f"--task unimol_pocket --loss unimol_infer --arch unimol_base --path {weights} "
         f"--dict-name {dict_basename} --log-interval 50 --log-format simple --random-token-prob 0 --leave-unmasked-prob 1.0 --mode infer"
     )
-    subprocess.run(["/usr/bin/bash", "-lc", cmd], check=True)
+    
+    # Run command and capture output for debugging
+    try:
+        result = subprocess.run(
+            ["/usr/bin/bash", "-lc", cmd],
+            check=True,
+            capture_output=True,
+            text=True
+        )
+        print("Uni-Mol inference completed successfully")
+        if result.stdout:
+            print("STDOUT:", result.stdout[-1000:])  # Print last 1000 chars
+    except subprocess.CalledProcessError as e:
+        print(f"ERROR: Uni-Mol inference failed with exit code {e.returncode}")
+        if e.stdout:
+            print("STDOUT:", e.stdout[-2000:])  # Print last 2000 chars
+        if e.stderr:
+            print("STDERR:", e.stderr[-2000:])  # Print last 2000 chars
+        raise
 
     # Return produced pkl path
     matches = glob.glob(os.path.join(results_dir, f"*_{job_name}.out.pkl"))
@@ -260,7 +358,7 @@ def main() -> None:
     parser.add_argument("--job-name", required=True, help="LMDB dataset name (also valid-subset)")
     parser.add_argument("--dict-file", required=True, help="Path to pocket dict file (e.g., unimol/example_data/pocket/dict_coarse.txt)")
     parser.add_argument("--weights", required=True, help="Path to pocket checkpoint .pt (e.g., pocket_pre_220816.pt)")
-    parser.add_argument("--radius", type=float, default=6.0, help="Pocket selection radius in Å")
+    parser.add_argument("--radius", type=float, default=10.0, help="Pocket selection radius in Å")
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-workers", type=int, default=8)
     # Optional selection controls

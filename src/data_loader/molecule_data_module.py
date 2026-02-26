@@ -21,6 +21,11 @@ rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
 from src.data_loader.molecule_tokenizer import MoleculeTokenizer  # noqa
 
+# Module-level variable to store current batch SMILES for Tanimoto loss
+# This bypasses HF Trainer's batch filtering which removes non-tensor values
+# and causes NaN when extra tensors are added to the batch
+_CURRENT_BATCH_SMILES: Optional[List[str]] = None
+
 
 class MolDataModule:
     def __init__(
@@ -221,7 +226,9 @@ class MolDataModule:
             # Extract condition features before passing to base_collator
             # DataCollatorForLanguageModeling only expects token-related fields (input_ids, etc.)
             condition_feature_keys = ["pocket_vec", "evo_vec", "ifp", "ligand_vec"]
-            smiles_key = "mol_string"  # Key for preserving SMILES strings for Tanimoto loss
+            # Keys for SMILES strings (check multiple for backwards compatibility)
+            # "SMILES" is the raw column, "mol_string" is added by tokenize_function
+            smiles_keys = ["mol_string", "smiles_strings", "SMILES"]
             condition_features = {}
 
             if include_cond_features:
@@ -231,14 +238,29 @@ class MolDataModule:
                         condition_features[key] = [f[key] for f in features]
 
             # Extract SMILES strings if available (for Tanimoto loss)
+            # Check multiple possible key names for backwards compatibility
             smiles_strings = None
-            if smiles_key in features[0]:
-                smiles_strings = [f[smiles_key] for f in features]
+            for smiles_key in smiles_keys:
+                if smiles_key in features[0]:
+                    smiles_strings = [f[smiles_key] for f in features]
+                    # Debug: print first time we find SMILES
+                    if not hasattr(_collate, '_debug_smiles_printed'):
+                        print(f"[Collate Debug] Found SMILES in key '{smiles_key}', first value: {smiles_strings[0][:50] if smiles_strings[0] else 'None'}")
+                        _collate._debug_smiles_printed = True
+                    break
+
+            # Debug: if no SMILES found, print available keys
+            if smiles_strings is None and not hasattr(_collate, '_debug_no_smiles_printed'):
+                print(f"[Collate Debug] No SMILES found! Available keys in features[0]: {list(features[0].keys())}")
+                _collate._debug_no_smiles_printed = True
 
             # Create features dict with only token-related fields for base_collator
+            # Exclude condition features, smiles strings, and morgan fingerprints
+            fingerprint_keys = ["morgan_fp"]
+            exclude_keys = set(condition_feature_keys + smiles_keys + fingerprint_keys)
             token_features = []
             for f in features:
-                token_feature = {k: v for k, v in f.items() if k not in condition_feature_keys and k != smiles_key}
+                token_feature = {k: v for k, v in f.items() if k not in exclude_keys}
                 token_features.append(token_feature)
 
             # Collate token-related features
@@ -300,9 +322,12 @@ class MolDataModule:
                     batch["ifp"] = torch.randn(B, 16384, dtype=torch.float32)      # Interaction fingerprint
                     batch["ligand_vec"] = torch.randn(B, 1536, dtype=torch.float32) # Ligand molecular representation
 
-            # Add SMILES strings to batch for Tanimoto loss (as list, not tensor)
-            if smiles_strings is not None:
-                batch["smiles_strings"] = smiles_strings
+            # Add Morgan fingerprints for Tanimoto loss (pre-computed, more efficient)
+            # Invalid molecules are filtered out during tokenization, so all fingerprints are valid
+            if "morgan_fp" in features[0] and len(features[0]["morgan_fp"]) > 0:
+                batch["morgan_fp"] = torch.tensor(
+                    [f["morgan_fp"] for f in features], dtype=torch.float32
+                )
 
             return batch
 
@@ -406,6 +431,7 @@ class MolDataModule:
         Returns:
             dict: Dictionary with the tokenized data, preserving condition features if present.
         """
+        # Handle batched input (element values are lists)
         outputs = tokenizer(
             element[mol_type],
             truncation=True,
@@ -415,8 +441,27 @@ class MolDataModule:
         )
         result = {"input_ids": outputs["input_ids"]}
 
-        # Preserve original SMILES/SAFE string for Tanimoto loss
-        result["mol_string"] = element[mol_type]
+        # Preserve original SMILES for reference
+        result["mol_string"] = element["SMILES"]
+
+        # Pre-compute Morgan fingerprints for Tanimoto loss (batched)
+        # Use empty list [] for invalid molecules - these will be filtered out later
+        morgan_fps = []
+        try:
+            from rdkit import Chem
+            from rdkit.Chem import AllChem
+            for smiles in element["SMILES"]:
+                mol = Chem.MolFromSmiles(smiles)
+                if mol is not None:
+                    fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius=2, nBits=2048)
+                    morgan_fps.append([int(b) for b in fp.ToBitString()])
+                else:
+                    # Invalid molecule - use empty list as marker for filtering
+                    morgan_fps.append([])
+        except Exception:
+            # If RDKit fails, mark all as invalid
+            morgan_fps = [[] for _ in element["SMILES"]]
+        result["morgan_fp"] = morgan_fps
 
         # Preserve condition features if they exist in the element
         condition_feature_keys = ["pocket_vec", "evo_vec", "ifp", "ligand_vec"]
@@ -558,6 +603,17 @@ class MolDataModule:
             },
         )
 
+        # Filter out molecules with invalid Morgan fingerprints (for Tanimoto loss)
+        # Invalid fingerprints are marked with empty list []
+        if "morgan_fp" in tokenized_dataset.column_names:
+            before_count = len(tokenized_dataset)
+            tokenized_dataset = tokenized_dataset.filter(
+                lambda x: len(x["morgan_fp"]) > 0,
+                num_proc=self.num_proc,
+            )
+            after_count = len(tokenized_dataset)
+            print(f"Filtered out {before_count - after_count} molecules with invalid Morgan fingerprints ({after_count} remaining)")
+
         tokenized_dataset.save_to_disk(self.save_directory)
         print(f"tokenized dataset saved at: {self.save_directory}")
 
@@ -670,12 +726,25 @@ class MolDataModule:
             batched=True,
             remove_columns=columns_to_remove,  # Don't remove condition features
             num_proc=self.num_proc,
+            load_from_cache_file=False,  # Disable cache to ensure fresh processing with morgan_fp
             fn_kwargs={
                 "max_length": self.max_seq_length,
                 "mol_type": self.mol_type,
                 "tokenizer": self.tokenizer,
             },
         )
+
+        # Filter out molecules with invalid Morgan fingerprints (same as training set)
+        if "morgan_fp" in _val_dataset.column_names:
+            before_count = len(_val_dataset)
+            _val_dataset = _val_dataset.filter(
+                lambda x: len(x["morgan_fp"]) > 0,
+                num_proc=self.num_proc,
+            )
+            after_count = len(_val_dataset)
+            if before_count != after_count:
+                print(f"Validation: Filtered out {before_count - after_count} molecules with invalid Morgan fingerprints ({after_count} remaining)")
+
         return _val_dataset
 
     def prepare_eval_dataset(self):

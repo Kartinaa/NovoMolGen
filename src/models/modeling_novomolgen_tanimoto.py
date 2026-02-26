@@ -756,7 +756,11 @@ class CrossAttentionTransformer(nn.Module):
                 self._original_forwards[layer_idx] = block.forward
 
                 # Create patched forward method with proper closure binding
-                def make_patched_forward(original_forward, adapter, gate, layer_idx, block_bound=block, self_bound=self):
+                # NOTE: We do NOT capture `gate` as a function argument because when the model is
+                # moved to GPU or a checkpoint is loaded, the Parameter object may be replaced.
+                # Instead, we look up self_bound.gates[str(layer_idx)] dynamically at each forward
+                # call to ensure we always use the current tensor in the computation graph.
+                def make_patched_forward(original_forward, adapter, layer_idx, block_bound=block, self_bound=self):
                     def patched_forward(hidden_states, *args, **kwargs):
                         # Ensure input hidden_states have correct dtype for flash_attn
                         # This is critical because flash_attn's internal operations require float16/bfloat16
@@ -795,6 +799,19 @@ class CrossAttentionTransformer(nn.Module):
                             # Apply dropout to attention output (single dropout point)
                             attn_out = self_bound.cross_dropout(attn_out)
 
+                            # Dynamically look up gate from self.gates to ensure we use the current
+                            # tensor that's in the computation graph (not a stale reference)
+                            gate = self_bound.gates[str(layer_idx)]
+
+                            # Debug: Log cross-attention output magnitude (only once per training)
+                            if self_bound.training and not hasattr(self_bound, '_debug_xattn_logged'):
+                                attn_norm = attn_out.norm().item()
+                                output_norm = output.norm().item()
+                                print(f"[XAttn Debug] Layer {layer_idx}: attn_out.norm={attn_norm:.4f}, output.norm={output_norm:.4f}, gate={gate.item():.4f}")
+                                print(f"[XAttn Debug] Layer {layer_idx}: gate.requires_grad={gate.requires_grad}, gate.data_ptr={gate.data_ptr()}, gate.is_leaf={gate.is_leaf}")
+                                if layer_idx == max(self_bound.cross_layers):
+                                    self_bound._debug_xattn_logged = True
+
                             # Unified gated residual connection: output = output + sigmoid(gate) * attn_out
                             gate_value = torch.sigmoid(gate)
                             output = output + gate_value * attn_out
@@ -806,11 +823,10 @@ class CrossAttentionTransformer(nn.Module):
                             return output
                     return patched_forward
 
-                # Apply the patch with proper binding
+                # Apply the patch with proper binding (no gate argument - looked up dynamically)
                 block.forward = make_patched_forward(
                     block.forward,
                     self.cross_adapters[str(layer_idx)],
-                    self.gates[str(layer_idx)],
                     layer_idx
                 )
 
@@ -1226,6 +1242,7 @@ class NovoMolGen(GPTLMHeadModel):
         ### position_ids: (batch, seqlen) int tensor, hidden_states: (batch, seqlen, hidden_size)
         # Build cond_tokens from provided condition features using the new encoder architecture
         z = None  # Will be set if ligand condition is available
+        mu = None  # Will be set if ligand condition is available (for Tanimoto loss)
         if (
             self.base_config.enable_cross_attn
             and cond_tokens is None
@@ -1246,7 +1263,6 @@ class NovoMolGen(GPTLMHeadModel):
                 raise ValueError("No protein condition provided, breaking the training loop")
 
             # Process ligand condition: ifp + ligand_vec -> mu, logvar, then sample z
-            mu = None  # Initialize mu for later use in Tanimoto loss
             if ifp is not None and ligand_vec is not None:
                 # Optional ablation: remove IFP information by zeroing it out
                 if getattr(self.base_config, "ablate_ifp", False):

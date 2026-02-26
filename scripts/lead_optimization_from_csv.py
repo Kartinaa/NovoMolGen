@@ -307,11 +307,14 @@ def generate_molecules_for_breakpoint(
         "conversion_empty": 0,
         "conversion_fragments": 0,
         "conversion_success": 0,
+        "duplicates_skipped": 0,
     }
     
     generated_molecules = []
+    unique_smiles_set = set()  # Track unique SMILES for deduplication
     attempt = 0
-    max_total_attempts = max_retries * (num_samples // batch_size + 1)
+    # Increase max attempts to ensure we get enough unique molecules
+    max_total_attempts = max_retries * (num_samples * 3 // batch_size + 1)
     
     while len(generated_molecules) < num_samples and attempt < max_total_attempts:
         needed = num_samples - len(generated_molecules)
@@ -407,8 +410,13 @@ def generate_molecules_for_breakpoint(
                 #     smiles = safe_to_smiles(safe_str.rstrip('.'))
                 
                 if smiles and '.' not in smiles:
-                    generated_molecules.append(smiles)
-                    conversion_stats["conversion_success"] += 1
+                    # Deduplication: only add if not already seen
+                    if smiles not in unique_smiles_set:
+                        unique_smiles_set.add(smiles)
+                        generated_molecules.append(smiles)
+                        conversion_stats["conversion_success"] += 1
+                    else:
+                        conversion_stats["duplicates_skipped"] += 1
                 elif not smiles:
                     conversion_stats["conversion_empty"] += 1
                 else:
@@ -550,6 +558,7 @@ def main():
         "conversion_empty": 0,
         "conversion_fragments": 0,
         "conversion_success": 0,
+        "duplicates_skipped": 0,
     }
     
     for idx, row in tqdm(breakpoint_df.iterrows(), total=len(breakpoint_df), desc="Processing breakpoints"):
@@ -615,6 +624,8 @@ def main():
     logger.info(f"Failed conversions (exceptions): {overall_stats['conversion_failed']}")
     logger.info(f"Empty conversions: {overall_stats['conversion_empty']}")
     logger.info(f"Fragment conversions: {overall_stats['conversion_fragments']}")
+    if overall_stats['duplicates_skipped'] > 0:
+        logger.info(f"Duplicates skipped: {overall_stats['duplicates_skipped']}")
     
     total_failed = (overall_stats['conversion_failed'] + 
                    overall_stats['conversion_empty'] + 

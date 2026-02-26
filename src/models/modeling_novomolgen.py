@@ -370,29 +370,33 @@ class CrossAttentionTransformer(nn.Module):
                 self._original_forwards[layer_idx] = block.forward
                 
                 # Create patched forward method with proper closure binding
-                def make_patched_forward(original_forward, adapter, gate, layer_idx, block_bound=block, self_bound=self):
+                # NOTE: We do NOT capture `gate` as a function argument because when the model is
+                # moved to GPU or a checkpoint is loaded, the Parameter object may be replaced.
+                # Instead, we look up self_bound.gates[str(layer_idx)] dynamically at each forward
+                # call to ensure we always use the current tensor in the computation graph.
+                def make_patched_forward(original_forward, adapter, layer_idx, block_bound=block, self_bound=self):
                     def patched_forward(hidden_states, *args, **kwargs):
                         # Ensure input hidden_states have correct dtype for flash_attn
                         # This is critical because flash_attn's internal operations require float16/bfloat16
                         model_dtype = next(self_bound.base_transformer.parameters()).dtype
                         if hidden_states.dtype != model_dtype:
                             hidden_states = hidden_states.to(model_dtype)
-                        
+
                         # Call original forward (self-attention + MLP)
                         original_output = original_forward(hidden_states, *args, **kwargs)
-                        
+
                         # Handle tuple return (some blocks return (output, rest))
                         if isinstance(original_output, tuple):
                             output, rest = original_output[0], original_output[1:]
                         else:
                             output = original_output
                             rest = ()
-                        
+
                         # Apply cross-attention if cond_tokens are available
                         if hasattr(self_bound, '_current_cond_tokens') and self_bound._current_cond_tokens is not None and str(layer_idx) in self_bound.cross_adapters:
                             # Apply layer norm before cross-attention
                             normed_output = F.layer_norm(output, output.shape[-1:])
-                            
+
                             # Ensure normed_output and cond_tokens have correct dtype for flash_attn cross-attention
                             # flash_attn requires float16 or bfloat16, not float32
                             model_dtype = next(self_bound.base_transformer.parameters()).dtype
@@ -401,30 +405,33 @@ class CrossAttentionTransformer(nn.Module):
                             cond_tokens = self_bound._current_cond_tokens
                             if cond_tokens.dtype != model_dtype:
                                 cond_tokens = cond_tokens.to(model_dtype)
-                            
+
                             # Apply cross-attention adapter (pure cross-attention, no residual)
-                            attn_out = adapter(normed_output, cond_tokens, 
+                            attn_out = adapter(normed_output, cond_tokens,
                                              self_bound._current_cond_attention_mask)
-                            
+
                             # Apply dropout to attention output (single dropout point)
                             attn_out = self_bound.cross_dropout(attn_out)
-                            
+
+                            # Dynamically look up gate from self.gates to ensure we use the current
+                            # tensor that's in the computation graph (not a stale reference)
+                            gate = self_bound.gates[str(layer_idx)]
+
                             # Unified gated residual connection: output = output + sigmoid(gate) * attn_out
                             gate_value = torch.sigmoid(gate)
                             output = output + gate_value * attn_out
-                        
+
                         # Return in original format
                         if rest:
                             return (output,) + rest
                         else:
                             return output
                     return patched_forward
-                
-                # Apply the patch with proper binding
+
+                # Apply the patch with proper binding (no gate argument - looked up dynamically)
                 block.forward = make_patched_forward(
-                    block.forward, 
-                    self.cross_adapters[str(layer_idx)], 
-                    self.gates[str(layer_idx)], 
+                    block.forward,
+                    self.cross_adapters[str(layer_idx)],
                     layer_idx
                 )
     

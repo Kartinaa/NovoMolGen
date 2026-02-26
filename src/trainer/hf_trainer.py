@@ -133,6 +133,19 @@ class HFTrainer(Trainer):
         self.state.grad_norm = None
         self.state.evaluation_task_results = None
 
+    def _prepare_inputs(self, inputs):
+        """
+        Override _prepare_inputs - clean up any non-tensor values that might cause issues.
+        Morgan fingerprints (morgan_fp, morgan_fp_valid) are tensors and pass through normally.
+        """
+        # Remove any non-tensor values that might have slipped through
+        if "smiles_strings" in inputs:
+            inputs.pop("smiles_strings")
+        if "smiles_bytes" in inputs:
+            inputs.pop("smiles_bytes")
+
+        return super()._prepare_inputs(inputs)
+
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
         """Override prediction_step to handle None inputs gracefully."""
         if inputs is None:
@@ -699,6 +712,14 @@ class HFTrainer(Trainer):
 
         Subclass and override for custom behavior.
         """
+        # Debug: check if smiles_strings is in inputs (only once)
+        if not hasattr(self, '_smiles_strings_debug_printed'):
+            self._smiles_strings_debug_printed = True
+            print(f"[Trainer Debug] Keys in inputs: {list(inputs.keys())}")
+            print(f"[Trainer Debug] smiles_strings in inputs: {'smiles_strings' in inputs}")
+            if 'smiles_strings' in inputs:
+                print(f"[Trainer Debug] smiles_strings type: {type(inputs['smiles_strings'])}, length: {len(inputs['smiles_strings']) if inputs['smiles_strings'] else 0}")
+        
         if (self.label_smoother is not None or self.compute_loss_func is not None) and "labels" in inputs:
             labels = inputs.pop("labels")
         else:

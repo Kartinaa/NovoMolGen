@@ -268,6 +268,7 @@ def generate_molecules_with_prefix(
         "conversion_empty": 0,
         "conversion_fragments": 0,
         "conversion_success": 0,
+        "duplicates_skipped": 0,
     }
     
     if len(validation_set) == 0:
@@ -321,8 +322,10 @@ def generate_molecules_with_prefix(
         
         # Generate num_samples molecules for this validation sample
         samples_generated_for_this_val = []
+        unique_smiles_set = set()  # Track unique SMILES for deduplication per sample
         attempt = 0
-        max_total_attempts = max_retries * (num_samples // batch_size + 1)
+        # Increase max attempts to ensure we get enough unique molecules
+        max_total_attempts = max_retries * (num_samples * 3 // batch_size + 1)
         
         while len(samples_generated_for_this_val) < num_samples and attempt < max_total_attempts:
             needed = num_samples - len(samples_generated_for_this_val)
@@ -412,8 +415,13 @@ def generate_molecules_with_prefix(
                 try:
                     smiles = safe_to_smiles(safe_str)
                     if smiles and '.' not in smiles:
-                        samples_generated_for_this_val.append(smiles)
-                        conversion_stats["conversion_success"] += 1
+                        # Deduplication: only add if not already seen for this sample
+                        if smiles not in unique_smiles_set:
+                            unique_smiles_set.add(smiles)
+                            samples_generated_for_this_val.append(smiles)
+                            conversion_stats["conversion_success"] += 1
+                        else:
+                            conversion_stats["duplicates_skipped"] += 1
                     elif not smiles:
                         conversion_stats["conversion_empty"] += 1
                         logger.debug(f"Failed to convert SAFE to SMILES (empty): {safe_str[:50]}...")
@@ -446,6 +454,8 @@ def generate_molecules_with_prefix(
     logger.info(f"    Failed conversions (exceptions): {conversion_stats['conversion_failed']}")
     logger.info(f"    Empty conversions: {conversion_stats['conversion_empty']}")
     logger.info(f"    Fragment conversions: {conversion_stats['conversion_fragments']}")
+    if conversion_stats['duplicates_skipped'] > 0:
+        logger.info(f"    Duplicates skipped: {conversion_stats['duplicates_skipped']}")
     total_failed = (conversion_stats['conversion_failed'] + 
                    conversion_stats['conversion_empty'] + 
                    conversion_stats['conversion_fragments'])

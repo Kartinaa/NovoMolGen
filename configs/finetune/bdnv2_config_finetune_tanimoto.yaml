@@ -12,7 +12,7 @@ enable_cross_attn: true
 cross_layers: [3, 7, 11, 15, 19, 23, 27, 31] # Add cross-attention to these transformer layers
 train_new_modules_only: false  # Freeze base model, train only new modules
 enable_lora: false
-ligand_vec_stats_path: "finetune_data/processed_data/hf_bdnv2_dataset/ligand_stats.pt"
+ligand_vec_stats_path: "finetune_data/crossdock_dataset/hf_dataset_crossdock/ligand_stats.pt"
 lora_r: 8
 lora_alpha: 16
 lora_dropout: 0.05

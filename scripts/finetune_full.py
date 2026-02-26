@@ -63,8 +63,8 @@ def _load_model_class(config: dict):
         print("Using Tanimoto model (tanimoto_weight > 0)")
     else:
         # Use InfoNCE model (original model)
-        from models.modeling_novomolgen_infonce_112925 import NovoMolGen as InfoNCEModel
-        from models.modeling_novomolgen_infonce_112925 import NovoMolGenConfig as InfoNCEConfig
+        from models.modeling_novomolgen_infonce_120225 import NovoMolGen as InfoNCEModel
+        from models.modeling_novomolgen_infonce_120225 import NovoMolGenConfig as InfoNCEConfig
         NovoMolGen = InfoNCEModel
         NovoMolGenConfig = InfoNCEConfig
         print("Using InfoNCE model (tanimoto_weight = 0)")
@@ -375,16 +375,25 @@ def create_data_module(config: Dict[str, Any], tokenizer: AutoTokenizer, logger:
     # Handle dummy dataset case
     dataset_name = config.get("dataset_name")
     include_condition_features = config.get("include_condition_features", False)
-    
+
     # Check if we should use MolDataModule (for tokenized datasets)
     # This is indicated by having tokenizer_path or tokenizer_name in config
     use_mol_data_module = config.get("tokenizer_path") is not None or config.get("tokenizer_name") is not None
-    
+
+    # Check if we should use the augmented data module (for pre-computed SAFE representations)
+    use_augmented_data_module = config.get("use_augmented_data_module", False)
+
     if use_mol_data_module and dataset_name and dataset_name != "dummy":
         # Use MolDataModule for tokenized datasets
-        logger.info("Using MolDataModule for tokenized dataset")
+        # Select appropriate data module class based on config
+        if use_augmented_data_module:
+            from data_loader.molecule_data_module_augmented import MolDataModuleAugmented as DataModuleClass
+            logger.info("Using MolDataModuleAugmented for pre-computed SAFE representations")
+        else:
+            DataModuleClass = MolDataModule
+            logger.info("Using MolDataModule for tokenized dataset")
         try:
-            data_module = MolDataModule(
+            data_module = DataModuleClass(
                 tokenizer_path=config.get("tokenizer_path"),
                 tokenizer_name=config.get("tokenizer_name", None),
                 dataset_name=dataset_name,
@@ -402,7 +411,7 @@ def create_data_module(config: Dict[str, Any], tokenizer: AutoTokenizer, logger:
             # Load the tokenized datasets
             data_module.load_tokenized_dataset()
             
-            logger.info(f"Created MolDataModule for dataset: {dataset_name}")
+            logger.info(f"Created {DataModuleClass.__name__} for dataset: {dataset_name}")
             logger.info(f"Training samples: {len(data_module.train_dataset) if data_module.train_dataset else 0}")
             if data_module.eval_dataset:
                 if isinstance(data_module.eval_dataset, dict):
@@ -1044,9 +1053,136 @@ class LossMonitoringCallback(TrainerCallback):
             logs['eval/beta_kl'] = getattr(actual_model, '_last_beta', 0.1)
 
 
+class GateFixCallback(TrainerCallback):
+    """Callback to ensure cross-attention gates are properly trainable and monitor gradient flow."""
+
+    def __init__(self, logger: logging.Logger):
+        self.logger = logger
+        self._checked = False
+        self._fixed = False
+        self._initial_gate_values = {}  # Track initial values to detect updates
+        self._last_grad_norms = {}  # Store gradient norms captured by hooks
+        self._hooks = []  # Store hook handles for cleanup
+
+    def on_train_begin(self, args, state, control, model=None, optimizer=None, **kwargs):
+        """Check and fix gates at the start of training, register backward hooks."""
+        if model is None or self._checked:
+            return
+
+        self._checked = True
+
+        # Get the actual model (handle PEFT wrapping)
+        actual_model = model
+        if hasattr(model, 'base_model'):
+            actual_model = model.base_model.model
+
+        # Check if model has gates
+        if not hasattr(actual_model, 'transformer'):
+            self.logger.warning("Model has no transformer attribute, skipping gate check")
+            return
+
+        transformer = actual_model.transformer
+        if not hasattr(transformer, 'gates') or transformer.gates is None:
+            self.logger.warning("Transformer has no gates, skipping gate check")
+            return
+
+        # Check and fix requires_grad for all gates
+        gates = transformer.gates
+        gate_params = []
+        gate_ptrs = set()
+        for layer_idx, gate in gates.items():
+            if not gate.requires_grad:
+                gate.requires_grad = True
+                self.logger.info(f"Fixed: Gate {layer_idx} requires_grad was False, now True")
+            gate_params.append(gate)
+            gate_ptrs.add(gate.data_ptr())
+            self._initial_gate_values[layer_idx] = gate.item()
+            self.logger.info(f"Gate {layer_idx}: value={gate.item():.4f}, requires_grad={gate.requires_grad}, data_ptr={gate.data_ptr()}")
+
+            # Register backward hook to capture gradient during backward pass
+            def make_hook(lid):
+                def hook(grad):
+                    if grad is not None:
+                        self._last_grad_norms[lid] = grad.item()
+                    return grad
+                return hook
+            handle = gate.register_hook(make_hook(layer_idx))
+            self._hooks.append(handle)
+
+        self.logger.info(f"Total gate parameters: {len(gate_params)}")
+        self.logger.info(f"Registered backward hooks on {len(self._hooks)} gates")
+
+        # Check if gates are in model.parameters()
+        model_param_ptrs = {p.data_ptr() for p in model.parameters()}
+        gates_in_model = gate_ptrs.issubset(model_param_ptrs)
+        self.logger.info(f"Gates in model.parameters(): {gates_in_model}")
+
+        if not gates_in_model:
+            self.logger.warning("⚠️ Gates NOT in model.parameters()! They won't be optimized!")
+            # Find which gates are missing
+            missing = gate_ptrs - model_param_ptrs
+            self.logger.warning(f"Missing gate pointers: {len(missing)}/{len(gate_ptrs)}")
+
+        # Check optimizer param groups
+        if optimizer is not None:
+            opt_param_ptrs = set()
+            for group in optimizer.param_groups:
+                for p in group['params']:
+                    opt_param_ptrs.add(p.data_ptr())
+            gates_in_optimizer = gate_ptrs.issubset(opt_param_ptrs)
+            self.logger.info(f"Gates in optimizer: {gates_in_optimizer}")
+            if not gates_in_optimizer:
+                self.logger.warning("⚠️ Gates NOT in optimizer param groups!")
+
+    def on_step_end(self, args, state, control, model=None, **kwargs):
+        """Log gate values and gradient info periodically."""
+        if model is None:
+            return
+
+        # Log every 500 steps
+        if state.global_step % 500 != 0:
+            return
+
+        # Get the actual model
+        actual_model = model
+        if hasattr(model, 'base_model'):
+            actual_model = model.base_model.model
+
+        if not hasattr(actual_model, 'transformer') or not hasattr(actual_model.transformer, 'gates'):
+            return
+
+        gates = actual_model.transformer.gates
+        if gates is None:
+            return
+
+        # Log gate values, changes from initial, and captured gradients from hooks
+        gate_info = []
+        for layer_idx, gate in sorted(gates.items(), key=lambda x: int(x[0])):
+            current_val = gate.item()
+            initial_val = self._initial_gate_values.get(layer_idx, current_val)
+            delta = current_val - initial_val
+
+            # Get gradient from hook (captured during backward, before zero_grad)
+            grad_val = self._last_grad_norms.get(layer_idx, None)
+            grad_str = f"grad={grad_val:.6f}" if grad_val is not None else "no_grad_hook"
+
+            gate_info.append(f"L{layer_idx}:{current_val:.4f}(Δ={delta:+.4f},{grad_str})")
+
+        self.logger.info(f"Step {state.global_step} Gates: {', '.join(gate_info)}")
+
+        # Clear captured gradients for next step
+        self._last_grad_norms.clear()
+
+    def on_train_end(self, args, state, control, **kwargs):
+        """Clean up hooks."""
+        for handle in self._hooks:
+            handle.remove()
+        self._hooks.clear()
+
+
 class ProgressiveUnfreezingCallback(TrainerCallback):
     """Callback to progressively unfreeze transformer layers during training."""
-    
+
     def __init__(self, config: Dict[str, Any], logger: logging.Logger):
         self.config = config
         self.logger = logger
@@ -1333,7 +1469,12 @@ def create_trainer(
     loss_monitoring_callback = LossMonitoringCallback(logger)
     callbacks.append(loss_monitoring_callback)
     logger.info("✅ Added LossMonitoringCallback to track NLL loss and KL loss separately")
-    
+
+    # Add GateFixCallback to ensure gates are trainable
+    gate_fix_callback = GateFixCallback(logger)
+    callbacks.append(gate_fix_callback)
+    logger.info("✅ Added GateFixCallback to monitor and fix cross-attention gates")
+
     # Add ProgressiveUnfreezingCallback if enabled
     progressive_unfreezing_callback = ProgressiveUnfreezingCallback(config, logger)
     if progressive_unfreezing_callback.enabled:

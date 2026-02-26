@@ -188,7 +188,7 @@ def analyze_recovery_rate(
             canonical = canonicalize_smiles(smiles)
             if canonical:
                 generated_canonical.add(canonical)
-                
+        
                 # Extract scaffold
                 scaffold = get_bemis_murcko_scaffold(canonical)
                 if scaffold:
@@ -337,7 +337,7 @@ def analyze_recovery_rate(
         for bin_name, count in smiles_bins.items():
             pct = count / len(recovery_rates) * 100
             print(f"  {bin_name:>10}: {count:4d} entries ({pct:5.1f}%)")
-        
+    
         print()
         print("Scaffold Recovery Rate Distribution by Bins:")
         for bin_name, count in scaffold_bins.items():
@@ -387,6 +387,9 @@ def analyze_recovery_rate(
         output_path = Path(output_file)
         output_dir = output_path.parent
         output_stem = output_path.stem
+        
+        # Ensure the output directory exists
+        output_dir.mkdir(parents=True, exist_ok=True)
         
         # 1. Save detailed CSV
         results_df = pd.DataFrame(analysis_results)
