@@ -8,27 +8,27 @@ Hi Tak! This is a guide to understanding how this repo works. It is built on top
 
 The goal is: given a protein pocket and a known active ligand, generate new drug-like molecules that are likely to bind to the same pocket.
 
-The model is a **pretrained causal language model** (NovoMolGen, ~32M params) that generates molecules token-by-token in [SAFE](https://github.com/datamol-io/safe) string format. We fine-tune it by injecting condition signals (protein + ligand embeddings) through **cross-attention adapters** at selected transformer layers.
+The model is a **pretrained causal language model** (NovoMolGen, ~300M params) that generates molecules token-by-token in [SAFE](https://github.com/datamol-io/safe) string format. We fine-tune it by injecting condition signals (protein + ligand embeddings) through **cross-attention adapters** at selected transformer layers.
 
 ```
-Protein Pocket ──────────────────────────────────┐
-  pocket_vec [B, 512]   (Uni-Mol)                │
-  evo_vec    [B, 1280]  (ESM-2)                  │
-                                                  ▼
-                                     ProteinConditionEncoder
-                                          │
-                                    protein_condition [B, z_dim]
-                                          │
-Reference Ligand ────────────────────┐    │
-  ifp        [B, 16384] (PLEC-IFP)  │    │
-  ligand_vec [B, 1536]  (MolBERT)   │    │
-                                     ▼    │
-                           LigandConditionEncoder (VAE)
-                             mu, sigma, logvar [B, z_dim]
-                                 │ reparameterize
-                                 z [B, z_dim]
-                                 │
-                                 └────────────────┘
+Protein Pocket ──────────────────────────────────---------------
+  pocket_vec [B, 512]   (Uni-Mol)                               │
+  evo_vec    [B, 1280]  (ESM-2)                                 
+                                                                ▼
+                                                          ProteinConditionEncoder
+                                                                │
+                                                          protein_condition [B, z_dim]
+                                                                │
+Reference Ligand ────────────────────┐                          │
+  ifp        [B, 16384] (PLEC-IFP)  │                           │
+  ligand_vec [B, 1536]  (MolBERT)   │                           │
+                                     ▼                          │
+                           LigandConditionEncoder (VAE)         │
+                             mu, sigma, logvar [B, z_dim]       │
+                                 │ reparameterize               │
+                                 z [B, z_dim]                   │
+                                 │                              │
+                                 └────────────────--------------
                                           │
                                    ConditionFusion
                                           │
@@ -162,7 +162,7 @@ fused_condition [B, z_dim] ──► outer-product with cond_proj ──► cond
 
 ### Cross-Attention Injection (Monkey Patching)
 
-Cross-attention adapters are injected at specified layers (e.g. layers 1–11 for 32M model) by **monkey-patching** each transformer block's `forward()` method:
+Cross-attention adapters are injected at specified layers (e.g. layers 3,7,11... for 300M model) by **monkey-patching** each transformer block's `forward()` method:
 
 ```python
 # Pseudocode of the patched block forward:
@@ -217,7 +217,7 @@ The purpose is to make the model's internal representations actually encode liga
 ## Step 4 — Training
 
 **Entry point:** `scripts/finetune_full.py`
-**Config:** `configs/finetune/bdnv2_config_finetune_infonce.yaml`
+** example Config:** `configs/finetune/bdnv2_config_finetune_infonce.yaml`
 
 ```bash
 python scripts/finetune_full.py \
@@ -226,21 +226,21 @@ python scripts/finetune_full.py \
   --run_name "my_run"
 ```
 
-### Key Config Parameters
+### Example Config Parameters
 
 ```yaml
 # Base model
-pretrained_path: "models/novomolgen_32M_YB/checkpoint-309520"
+pretrained_path: "models/novomolgen_300M_YB/checkpoint-309520"
 
 # Cross-attention
 enable_cross_attn: true
-cross_layers: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+cross_layers: [3,7,11,15,19,23,27,31]
 train_new_modules_only: false   # false = fine-tune entire model
                                 # true  = freeze base, train adapters+encoders only
 
 # Losses
-infonce_weight: 1.0
-infonce_temperature: 0.05
+infonce_weight: 0.1
+infonce_temperature: 0.2
 
 # KL annealing
 vae:
@@ -253,9 +253,9 @@ vae:
 dataset_name: "finetune_data/processed_data/hf_bdnv2_dataset/train"
 mol_type: "SAFE"
 max_seq_length: 64
-per_device_train_batch_size: 200
-gradient_accumulation_steps: 5   # effective batch = 1000
-learning_rate: 1e-5
+per_device_train_batch_size: 250
+gradient_accumulation_steps: 4   # effective batch = 1000
+learning_rate: 5e-5
 ```
 
 ### What Gets Trained
