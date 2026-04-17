@@ -200,3 +200,7 @@ logs/
 
 # Cursor
 .cursorignore
+
+# MD simulation data
+PAC1R/
+PTPMT1/

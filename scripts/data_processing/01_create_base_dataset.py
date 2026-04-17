@@ -16,11 +16,11 @@ def load_data_splits(data_dir: Path):
     print("Loading data splits...")
     
     # Load training data
-    with open(data_dir / "training_set_random_splitting.pkl", 'rb') as f:
+    with open(data_dir / "training_set.pkl", 'rb') as f:
         training_data = pickle.load(f)
     
     # Load validation data  
-    with open(data_dir / "validation_set_random_splitting.pkl", 'rb') as f:
+    with open(data_dir / "validation_set.pkl", 'rb') as f:
         validation_data = pickle.load(f)
     
     print(f"Training samples: {len(training_data)}")

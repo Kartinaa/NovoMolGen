@@ -114,7 +114,7 @@ def main():
     parser.add_argument(
         "--subdir",
         type=str,
-        default="Round3/De_novo_Results/StructureSAFE_xdock_122325_generated_molecules",
+        default="Round1/De_novo_Results/StructureSAFE_xdock_122325_generated_molecules",
         help=(
             "Subdirectory (relative to each ligand folder) where .smi will be written. "
             "Default: 'Round1/De_novo_Results/StructureSAFE_generated_molecules'"

@@ -29,7 +29,7 @@ from rdkit import Chem
 PROJECT_ROOT = Path(__file__).resolve().parents[3]  # 上兩級：.../Structure_safe
 sys.path.append(str(PROJECT_ROOT / "src"))
 
-from models.modeling_novomolgen_infonce_120225 import NovoMolGen, NovoMolGenConfig
+from models.modeling_novomolgen_infonce_120225_v2 import NovoMolGen, NovoMolGenConfig
 from data_loader.molecule_tokenizer import MoleculeTokenizer
 from data_loader.utils import safe_to_smiles
 from transformers import AutoTokenizer

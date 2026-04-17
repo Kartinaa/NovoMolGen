@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-Generate molecules from a trained full model checkpoint for each validation set.
+Generate molecules from a *no-protein-encoder ablation* checkpoint for MolGenBench dataset.
+
+Identical to generate_from_full_model.py except uses
+modeling_novomolgen_infonce_120225_no_protein, which zeros out protein_condition internally.
 
 Usage:
-    python scripts/generate_from_full_model.py \
-        --model_path outputs/11_10_25_SAFEGen/checkpoint-33400/full_model \
-        --validation_sets finetune_data/processed_data/hf_bdnv2_dataset/validation \
+    python scripts/data_processing/molgenbench/generate_from_full_model_no_protein.py \
+        --model_path outputs/.../checkpoint-XXXX/full_model \
+        --validation_sets <molgenbench_hf_dataset_path> \
         --num_samples_per_val 50 \
-        --output_dir outputs/generated_molecules
+        --output_dir outputs/generated_molecules_no_protein
 """
 
 import argparse
@@ -23,9 +26,11 @@ import torch
 import yaml
 from datasets import load_from_disk
 from tqdm import tqdm
+from rdkit import Chem
 
 # Add src to path
-sys.path.append(str(Path(__file__).parent.parent / "src"))
+PROJECT_ROOT = Path(__file__).resolve().parents[3]  # 上兩級：.../Structure_safe
+sys.path.append(str(PROJECT_ROOT / "src"))
 
 from models.modeling_novomolgen_infonce_120225_no_protein import NovoMolGen, NovoMolGenConfig
 from data_loader.molecule_tokenizer import MoleculeTokenizer
@@ -171,6 +176,7 @@ def generate_molecules_for_validation_set(
     max_retries: int = 10,
     ifp_ablation: str = "none",
     cond_ablation: str = "none",
+    keep_invalid: bool = False,
 ):
     """Generate molecules for a validation set using condition features.
     
@@ -206,10 +212,11 @@ def generate_molecules_for_validation_set(
     
     if not has_conditions:
         logger.warning("Condition features not found in validation set, generating without conditions")
-        # Generate without conditions - keep generating until we have num_samples valid SMILES
-        logger.info(f"Generating {num_samples} molecules (will retry if conversion fails)")
+        # Generate without conditions
+        logger.info(f"Generating {num_samples} molecules (unconditional)")
         attempt = 0
-        while len(all_generated) < num_samples and attempt < max_retries * (num_samples // batch_size + 1):
+        max_total_attempts = max_retries * (num_samples // batch_size + 1)
+        while len(all_generated) < num_samples and attempt < max_total_attempts:
             needed = num_samples - len(all_generated)
             current_batch_size = min(batch_size, needed)
             
@@ -232,27 +239,37 @@ def generate_molecules_for_validation_set(
                         break
                     try:
                         smiles = safe_to_smiles(safe_str)
-                        if smiles and '.' not in smiles:  # Only add valid SMILES without fragments
+                        if keep_invalid:
+                            # 保留所有轉換結果（包括帶 '.' 的、多片段的），僅在 None/錯誤時標記統計
+                            if smiles is None or smiles == "":
+                                conversion_stats["conversion_empty"] += 1
+                                logger.debug(f"Failed to convert SAFE to SMILES (empty result): {safe_str[:50]}...")
+                            else:
+                                conversion_stats["conversion_success"] += 1
                             all_generated.append(smiles)
-                            conversion_stats["conversion_success"] += 1
-                        elif not smiles:
-                            # Conversion returned None or empty string
-                            conversion_stats["conversion_empty"] += 1
-                            logger.debug(f"Failed to convert SAFE to SMILES (empty result): {safe_str[:50]}...")
                         else:
-                            # Contains fragments ('.')
-                            conversion_stats["conversion_fragments"] += 1
-                            logger.debug(f"Failed to convert SAFE to SMILES (fragments): {safe_str[:50]}...")
+                            # 原有邏輯：只保留單片段、合法的 SMILES
+                            if smiles and '.' not in smiles:  # Only add valid SMILES without fragments
+                                all_generated.append(smiles)
+                                conversion_stats["conversion_success"] += 1
+                            elif not smiles:
+                                # Conversion returned None or empty string
+                                conversion_stats["conversion_empty"] += 1
+                                logger.debug(f"Failed to convert SAFE to SMILES (empty result): {safe_str[:50]}...")
+                            else:
+                                # Contains fragments ('.')
+                                conversion_stats["conversion_fragments"] += 1
+                                logger.debug(f"Failed to convert SAFE to SMILES (fragments): {safe_str[:50]}...")
                     except Exception as e:
                         conversion_stats["conversion_failed"] += 1
                         logger.debug(f"Error converting SAFE to SMILES: {safe_str[:50]}... Error: {e}")
             
             attempt += 1
             if attempt % 10 == 0:
-                logger.info(f"  Generated {len(all_generated)}/{num_samples} valid molecules (attempt {attempt})")
+                logger.info(f"  Generated {len(all_generated)}/{num_samples} molecules (attempt {attempt})")
         
         if len(all_generated) < num_samples:
-            logger.warning(f"Only generated {len(all_generated)}/{num_samples} valid molecules after {attempt} attempts")
+            logger.warning(f"Only generated {len(all_generated)}/{num_samples} molecules after {attempt} attempts")
         
         # Log conversion statistics
         logger.info(f"  Conversion statistics:")
@@ -286,6 +303,7 @@ def generate_molecules_for_validation_set(
         # Iterate over each sample in validation set
         for val_idx in tqdm(range(len(validation_set)), desc="Processing validation samples"):
             val_sample = validation_set[val_idx]
+            ligand_path = val_sample.get("ligand_path", None)
             
             # Extract condition features for this sample
             pocket_vec = torch.tensor([val_sample["pocket_vec"]], dtype=torch.float32).to(device).to(model_dtype)
@@ -393,23 +411,33 @@ def generate_molecules_for_validation_set(
                 decoded_strings = [s.replace(" ", "") for s in decoded_strings]
                 conversion_stats["total_safe_generated"] += len(decoded_strings)
                 
-                # Convert SAFE to SMILES - only add valid ones
+                # Convert SAFE to SMILES
                 for safe_str in decoded_strings:
                     if len(samples_generated_for_this_val) >= num_samples:
                         break
                     try:
                         smiles = safe_to_smiles(safe_str)
-                        if smiles and '.' not in smiles:  # Only add if conversion succeeded and no fragments
+                        if keep_invalid:
+                            # 保留所有轉換結果（包括多片段），僅在 None/錯誤時標記統計
+                            if smiles is None or smiles == "":
+                                conversion_stats["conversion_empty"] += 1
+                                logger.debug(f"Failed to convert SAFE to SMILES (empty result): {safe_str[:50]}...")
+                            else:
+                                conversion_stats["conversion_success"] += 1
                             samples_generated_for_this_val.append(smiles)
-                            conversion_stats["conversion_success"] += 1
-                        elif not smiles:
-                            # Conversion returned None or empty string
-                            conversion_stats["conversion_empty"] += 1
-                            logger.debug(f"Failed to convert SAFE to SMILES (empty result): {safe_str[:50]}...")
                         else:
-                            # Contains fragments ('.')
-                            conversion_stats["conversion_fragments"] += 1
-                            logger.debug(f"Failed to convert SAFE to SMILES (fragments): {safe_str[:50]}...")
+                            # 原有邏輯：僅保留單片段、合法的 SMILES
+                            if smiles and '.' not in smiles:  # Only add if conversion succeeded and no fragments
+                                samples_generated_for_this_val.append(smiles)
+                                conversion_stats["conversion_success"] += 1
+                            elif not smiles:
+                                # Conversion returned None or empty string
+                                conversion_stats["conversion_empty"] += 1
+                                logger.debug(f"Failed to convert SAFE to SMILES (empty result): {safe_str[:50]}...")
+                            else:
+                                # Contains fragments ('.')
+                                conversion_stats["conversion_fragments"] += 1
+                                logger.debug(f"Failed to convert SAFE to SMILES (fragments): {safe_str[:50]}...")
                     except Exception as e:
                         conversion_stats["conversion_failed"] += 1
                         logger.debug(f"Error converting SAFE to SMILES: {safe_str[:50]}... Error: {e}")
@@ -427,6 +455,7 @@ def generate_molecules_for_validation_set(
             # Store condition info for reference
             all_condition_info.append({
                 "validation_index": int(val_idx),
+                "ligand_path": ligand_path,
                 "generated_molecules": samples_generated_for_this_val,  # Already converted to SMILES
             })
         
@@ -495,6 +524,16 @@ def main():
         default=2025,
         help="Random seed for generation (default: 2025)",
     )
+    parser.add_argument(
+        "--keep_invalid",
+        action="store_true",
+        help=(
+            "If set, do NOT filter out invalid or multi-fragment ligands:\n"
+            "  - All SAFE→SMILES conversion results are kept in the output list\n"
+            "  - Failed conversions are recorded as null (None) instead of being dropped\n"
+            "  - Statistics (success/empty/failed) are still logged for analysis"
+        ),
+    )
     
     args = parser.parse_args()
     # Set random seed for reproducibility
@@ -514,6 +553,7 @@ def main():
     logger.info(f"Output directory: {output_dir}")
     logger.info(f"IFP ablation mode: {args.ifp_ablation}")
     logger.info(f"Global condition ablation mode: {args.cond_ablation}")
+    logger.info(f"Keep invalid ligands: {args.keep_invalid}")
     
     # Load model and tokenizer
     logger.info("\n" + "=" * 60)
@@ -558,6 +598,7 @@ def main():
             max_retries=args.max_retries,
             ifp_ablation=args.ifp_ablation,
             cond_ablation=args.cond_ablation,
+            keep_invalid=args.keep_invalid,
         )
         
         logger.info(f"  Generated {len(generated_molecules)} valid SMILES molecules")

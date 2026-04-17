@@ -267,6 +267,7 @@ def generate_molecules_for_breakpoint(
     cond_ablation: str = "none",
     append_mode: bool = True,
     add_dot_to_prefix: bool = True,
+    min_unique: int = 100,
 ):
     """Generate molecules for a single breakpoint with given conditions.
     
@@ -309,16 +310,16 @@ def generate_molecules_for_breakpoint(
         "conversion_success": 0,
         "duplicates_skipped": 0,
     }
-    
+
     generated_molecules = []
     unique_smiles_set = set()  # Track unique SMILES for deduplication
     attempt = 0
-    # Increase max attempts to ensure we get enough unique molecules
-    max_total_attempts = max_retries * (num_samples * 3 // batch_size + 1)
-    
+    # Allow many more attempts; each attempt generates a full batch
+    max_total_attempts = max(max_retries * 50, num_samples * 10 // batch_size + 50)
+
     while len(generated_molecules) < num_samples and attempt < max_total_attempts:
-        needed = num_samples - len(generated_molecules)
-        current_batch_size = min(batch_size, needed)
+        # Always generate a full batch for maximum diversity
+        current_batch_size = batch_size
         
         # Repeat prefix_ids and condition features for batch
         input_ids = prefix_ids.repeat(current_batch_size, 1)
@@ -404,11 +405,11 @@ def generate_molecules_for_breakpoint(
             try:
                 # Try to convert as-is first
                 smiles = safe_to_smiles(safe_str)
-                
+
                 # # If failed and has trailing dot, try removing it
                 # if not smiles and safe_str.endswith('.'):
                 #     smiles = safe_to_smiles(safe_str.rstrip('.'))
-                
+
                 if smiles and '.' not in smiles:
                     # Deduplication: only add if not already seen
                     if smiles not in unique_smiles_set:
@@ -423,9 +424,28 @@ def generate_molecules_for_breakpoint(
                     conversion_stats["conversion_fragments"] += 1
             except Exception as e:
                 conversion_stats["conversion_failed"] += 1
-        
+
         attempt += 1
-    
+
+        # Log progress every 10 attempts
+        if attempt % 10 == 0:
+            logger.debug(
+                f"  Attempt {attempt}/{max_total_attempts}: "
+                f"{len(generated_molecules)}/{num_samples} unique SMILES collected"
+            )
+
+    if len(generated_molecules) < min_unique:
+        logger.warning(
+            f"  Only collected {len(generated_molecules)} unique SMILES "
+            f"(min_unique={min_unique}, target={num_samples}) after {attempt} attempts. "
+            f"Stats: {conversion_stats}"
+        )
+    elif len(generated_molecules) < num_samples:
+        logger.info(
+            f"  Collected {len(generated_molecules)}/{num_samples} unique SMILES "
+            f"(reached attempt limit {max_total_attempts})"
+        )
+
     return generated_molecules, conversion_stats
 
 
@@ -475,6 +495,13 @@ def main():
         type=int,
         default=2025,
         help="Random seed for generation (default: 2025)",
+    )
+    parser.add_argument(
+        "--min_unique",
+        type=int,
+        default=100,
+        help="Minimum number of unique SMILES to collect per breakpoint; "
+             "warns if not reached (default: 100)",
     )
     parser.add_argument(
         "--add_dot_to_prefix",
@@ -592,6 +619,7 @@ def main():
             cond_ablation=args.cond_ablation,
             append_mode=args.append_mode,
             add_dot_to_prefix=args.add_dot_to_prefix,
+            min_unique=args.min_unique,
         )
         
         # Update overall stats

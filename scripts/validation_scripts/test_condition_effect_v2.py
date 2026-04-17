@@ -31,7 +31,7 @@ import safe  # 用于 SMILES -> SAFE 转换
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT / "src"))
 
-from models.modeling_novomolgen_infonce_120225_dropout import NovoMolGen, NovoMolGenConfig  # type: ignore
+from models.modeling_novomolgen_infonce_120225_v2 import NovoMolGen, NovoMolGenConfig  # type: ignore
 from transformers import AutoTokenizer  # type: ignore
 
 
