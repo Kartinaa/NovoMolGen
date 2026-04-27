@@ -7,12 +7,12 @@
 ablate_ifp: false
 
 # Model configuration
-pretrained_path: "models/novomogen_300M_YB/checkpoint-309520"
+pretrained_path: "models/novomolgen_300M_YB/checkpoint-309520"
 enable_cross_attn: true
 cross_layers: [3, 7, 11, 15, 19, 23, 27, 31] # Add cross-attention to these transformer layers
 train_new_modules_only: false  # Freeze base model, train only new modules
 enable_lora: false
-ligand_vec_stats_path: "finetune_data/crossdock_dataset/hf_dataset_crossdock/ligand_stats.pt"
+ligand_vec_stats_path: "finetune_data/processed_data/hf_bdnv2_dataset_tanimoto/ligand_stats.pt"
 lora_r: 8
 lora_alpha: 16
 lora_dropout: 0.05
@@ -28,13 +28,13 @@ infonce_weight: 0.0
 infonce_temperature: 0.2
 
 # Data configuration (matching bdnv2.yaml)
-dataset_name: "finetune_data/crossdock_dataset/hf_dataset_crossdock/train"
+dataset_name: "finetune_data/processed_data/hf_bdnv2_dataset_tanimoto/train"
 tokenizer_path: "./data/tokenizers/tokenizer_bpe_None_SAFE_500_0_0.1.json"
 mol_type: "SAFE"
 max_seq_length: 64  # Alias for max_length, used by MolDataModule
-num_proc: 8
+num_proc: 1
 streaming: false
-validation_set_names: ["finetune_data/crossdock_dataset/hf_dataset_crossdock/validation"]
+validation_set_names: ["finetune_data/processed_data/hf_bdnv2_dataset_tanimoto/validation"]
 filter_validation_set: false
 include_condition_features: true  # Enable condition features (pocket_vec, evo_vec, ifp, ligand_vec)
 latent_dim: 128
@@ -69,9 +69,9 @@ total_batch_size: 1000  # Total batch size = per_device_train_batch_size * gradi
 logging_steps: 10  # Log every N steps
 log_on_each_node: false  # Log on each node in distributed training
 save_strategy: "steps"  # Save strategy: "no", "steps", "epoch", "steps"
-save_steps: 500  # Save checkpoint every N steps
+save_steps: 2100  # Save checkpoint every N steps
 save_total_limit: 15  # Maximum number of checkpoints to keep
-save_spec_steps: 12000 # Save special checkpoints every N steps
+save_spec_steps: 30000 # Save special checkpoints every N steps
 save_safetensors: false  # Save in SafeTensors format
 push_spec_checkpoints: false  # Push special checkpoints to Hub
 repo_id: null  # HuggingFace Hub repository ID (set to null to disable)
@@ -83,7 +83,7 @@ remove_unused_columns: false  # Remove unused columns from dataset
 report_to: ["wandb"]  # Reporting integrations: ["wandb", "tensorboard", etc.]
 
 # Run configuration
-run_name: "bdnv2_300M_tanimoto_loss"  # Run name for logging and tracking
+run_name: "bdnv2_300M_lr5e-5_ufa_k0.1c5_gate3_tani0.1_xattn_new"  # Run name for logging and tracking
 
 # Logging
 wandb_logs: true  # Set to true if you want to use Weights & Biases

@@ -63,8 +63,8 @@ def _load_model_class(config: dict):
         print("Using Tanimoto model (tanimoto_weight > 0)")
     else:
         # Use InfoNCE model (original model)
-        from models.modeling_novomolgen_infonce_120225_v2 import NovoMolGen as InfoNCEModel
-        from models.modeling_novomolgen_infonce_120225_v2 import NovoMolGenConfig as InfoNCEConfig
+        from models.modeling_novomolgen_infonce_120225_v3 import NovoMolGen as InfoNCEModel
+        from models.modeling_novomolgen_infonce_120225_v3 import NovoMolGenConfig as InfoNCEConfig
         NovoMolGen = InfoNCEModel
         NovoMolGenConfig = InfoNCEConfig
         print("Using InfoNCE model (tanimoto_weight = 0)")

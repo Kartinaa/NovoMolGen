@@ -27,7 +27,7 @@ from tqdm import tqdm
 # Add src to path
 sys.path.append(str(Path(__file__).parent.parent / "src"))
 
-from models.modeling_novomolgen_infonce_120225_no_protein import NovoMolGen, NovoMolGenConfig
+from models.modeling_novomolgen_infonce_120225_dropout import NovoMolGen, NovoMolGenConfig
 from data_loader.molecule_tokenizer import MoleculeTokenizer
 from data_loader.utils import safe_to_smiles
 from transformers import AutoTokenizer

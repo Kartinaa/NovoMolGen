@@ -201,6 +201,9 @@ logs/
 # Cursor
 .cursorignore
 
+# Paper drafts
+paper/
+
 # MD simulation data
 PAC1R/
 PTPMT1/

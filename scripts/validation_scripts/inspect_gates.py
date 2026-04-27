@@ -21,7 +21,7 @@ from datasets import load_from_disk
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT / "src"))
 
-from models.modeling_novomolgen_tanimoto import NovoMolGen, NovoMolGenConfig  # type: ignore
+from models.modeling_novomolgen_infonce_120225_v2 import NovoMolGen, NovoMolGenConfig  # type: ignore
 
 
 def setup_logging(log_level: str = "INFO") -> logging.Logger:

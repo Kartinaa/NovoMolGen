@@ -15,12 +15,13 @@ from pathlib import Path
 import argparse
 from tqdm import tqdm
 import sys
+from typing import Optional
 
 # Constants
 IFP_DIM = 16384
 
 
-def load_ifp_matrix(matrix_file: Path, packed_bits: bool = False, num_rows: int | None = None):
+def load_ifp_matrix(matrix_file: Path, packed_bits: bool = False, num_rows: Optional[int] = None):
     """
     Load IFP matrix as memmap (read-only, memory-efficient).
     
@@ -72,7 +73,7 @@ def load_ifp_matrix(matrix_file: Path, packed_bits: bool = False, num_rows: int 
 def merge_ifp_separate_mode(
     dataset_file: Path,
     ifp_matrix_file: Path,
-    ifp_meta_file: Path | None,
+    ifp_meta_file: Optional[Path],
     output_file: Path,
     packed_bits: bool = False,
 ):
@@ -145,7 +146,7 @@ def merge_ifp_separate_mode(
 def merge_ifp_embed_mode(
     dataset_file: Path,
     ifp_matrix_file: Path,
-    ifp_meta_file: Path | None,
+    ifp_meta_file: Optional[Path],
     output_file: Path,
     packed_bits: bool = False,
     chunk_size: int = 1000,
