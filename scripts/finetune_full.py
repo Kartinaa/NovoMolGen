@@ -49,25 +49,39 @@ NovoMolGenConfig = None
 
 
 def _load_model_class(config: dict):
-    """Dynamically load the appropriate model class based on config."""
+    """Dynamically load the appropriate model class based on config.
+
+    Selection priority:
+    1. ligand_drop_prob in config → v4 CFG model (supports Tanimoto + CFG)
+    2. tanimoto_weight > 0 (no CFG) → legacy tanimoto model
+    3. otherwise → v3 InfoNCE model
+    """
     global NovoMolGen, NovoMolGenConfig
 
+    use_cfg = "ligand_drop_prob" in config
     tanimoto_weight = config.get("tanimoto_weight", 0.0)
 
-    if tanimoto_weight > 0:
-        # Use Tanimoto model (supports both Tanimoto and InfoNCE losses)
+    if use_cfg:
+        # v4: CFG model — supports Tanimoto loss and CFG dropout
+        from models.modeling_novomolgen_infonce_120225_v4 import NovoMolGen as V4Model
+        from models.modeling_novomolgen_infonce_120225_v4 import NovoMolGenConfig as V4Config
+        NovoMolGen = V4Model
+        NovoMolGenConfig = V4Config
+        print(f"Using v4 CFG model (ligand_drop_prob={config['ligand_drop_prob']}, tanimoto_weight={tanimoto_weight})")
+    elif tanimoto_weight > 0:
+        # Legacy: Tanimoto model without CFG
         from models.modeling_novomolgen_tanimoto import NovoMolGen as TanimotoModel
         from models.modeling_novomolgen_tanimoto import NovoMolGenConfig as TanimotoConfig
         NovoMolGen = TanimotoModel
         NovoMolGenConfig = TanimotoConfig
-        print("Using Tanimoto model (tanimoto_weight > 0)")
+        print("Using legacy Tanimoto model (tanimoto_weight > 0, no CFG)")
     else:
-        # Use InfoNCE model (original model)
+        # v3: InfoNCE model
         from models.modeling_novomolgen_infonce_120225_v3 import NovoMolGen as InfoNCEModel
         from models.modeling_novomolgen_infonce_120225_v3 import NovoMolGenConfig as InfoNCEConfig
         NovoMolGen = InfoNCEModel
         NovoMolGenConfig = InfoNCEConfig
-        print("Using InfoNCE model (tanimoto_weight = 0)")
+        print("Using v3 InfoNCE model (tanimoto_weight = 0, no CFG)")
 from data_loader.molecule_data_module import MolDataModule
 from trainer.hf_trainer import HFTrainer, HFTrainingArguments
 
@@ -172,6 +186,10 @@ def create_model(config: Dict[str, Any], logger: logging.Logger) -> NovoMolGen:
     # Optional ablation controls (e.g., remove IFP information during training)
     base_config.ablate_ifp = config.get("ablate_ifp", False)
 
+    # v4 CFG: ligand dropout probability
+    if "ligand_drop_prob" in config:
+        base_config.ligand_drop_prob = float(config["ligand_drop_prob"])
+
     # InfoNCE alignment configuration (optional)
     if "infonce_weight" in config:
         base_config.infonce_weight = float(config.get("infonce_weight", 0.0))
@@ -186,6 +204,8 @@ def create_model(config: Dict[str, Any], logger: logging.Logger) -> NovoMolGen:
         base_config.tanimoto_fp_radius = int(config.get("tanimoto_fp_radius", 2))
     if "tanimoto_fp_bits" in config:
         base_config.tanimoto_fp_bits = int(config.get("tanimoto_fp_bits", 2048))
+    if "tanimoto_use_mu" in config:
+        base_config.tanimoto_use_mu = bool(config.get("tanimoto_use_mu", True))
     
     # Ligand vector statistics for normalization (optional)
     # if "ligand_vec_stats_path" in config:

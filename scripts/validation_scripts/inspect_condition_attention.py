@@ -20,6 +20,7 @@ Usage:
 """
 
 import argparse
+import importlib
 import logging
 import sys
 from pathlib import Path
@@ -32,7 +33,12 @@ from transformers import AutoTokenizer
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT / "src"))
 
-from models.modeling_novomolgen_infonce_120225_v3 import NovoMolGen, NovoMolGenConfig  # type: ignore
+
+def _resolve_model_module(module_name: str):
+    """Dynamically import the requested model module and return (NovoMolGen, NovoMolGenConfig)."""
+    full_name = f"models.{module_name}" if not module_name.startswith("models.") else module_name
+    mod = importlib.import_module(full_name)
+    return mod.NovoMolGen, mod.NovoMolGenConfig
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +59,8 @@ def setup_logging(log_level: str = "INFO") -> logging.Logger:
 # Model loading (same pattern as test_condition_effect_v2.py)
 # ---------------------------------------------------------------------------
 
-def load_model_and_tokenizer(model_path: str, logger: logging.Logger):
+def load_model_and_tokenizer(model_path: str, logger: logging.Logger,
+                              NovoMolGen, NovoMolGenConfig):
     mp = Path(model_path)
     logger.info(f"Loading model from: {mp}")
     config = NovoMolGenConfig.from_pretrained(str(mp))
@@ -144,7 +151,7 @@ def make_batch(ds, indices, device, tokenizer, convert_to_safe, max_length, mode
 # Attention capture via temporary forward patch
 # ---------------------------------------------------------------------------
 
-def patch_adapters_for_capture(model: NovoMolGen) -> Dict[int, dict]:
+def patch_adapters_for_capture(model) -> Dict[int, dict]:
     """
     Temporarily patch each CrossAttentionAdapter to also capture:
       - attn_weights  [B, num_heads, T, Lc]
@@ -230,7 +237,7 @@ def patch_adapters_for_capture(model: NovoMolGen) -> Dict[int, dict]:
     return capture_store
 
 
-def restore_adapters(model: NovoMolGen):
+def restore_adapters(model):
     if not hasattr(model, "_original_adapter_forwards"):
         return
     for layer_idx, orig in model._original_adapter_forwards.items():
@@ -246,7 +253,7 @@ def restore_adapters(model: NovoMolGen):
 
 @torch.no_grad()
 def inspect_attention(
-    model: NovoMolGen,
+    model,
     ds,
     device: torch.device,
     tokenizer,
@@ -374,16 +381,23 @@ def main():
     parser.add_argument("--convert_smiles_to_safe", action="store_true",
                         help="Convert SMILES column to SAFE before tokenization")
     parser.add_argument("--max_length", type=int, default=64)
+    parser.add_argument("--model_module", type=str,
+                        default="modeling_novomolgen_infonce_120225_v4",
+                        help="Model module name under src/models/ (e.g. modeling_novomolgen_infonce_120225_dropout for the 04/13/25 model)")
     parser.add_argument("--log_level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = parser.parse_args()
 
     logger = setup_logging(args.log_level)
     logger.info("=" * 60)
-    logger.info("Cross-Attention Condition Inspector (v2)")
+    logger.info("Cross-Attention Condition Inspector")
+    logger.info(f"  Using model module: {args.model_module}")
     logger.info("=" * 60)
 
-    model, tokenizer, device = load_model_and_tokenizer(args.model_path, logger)
+    NovoMolGen, NovoMolGenConfig = _resolve_model_module(args.model_module)
+    model, tokenizer, device = load_model_and_tokenizer(
+        args.model_path, logger, NovoMolGen, NovoMolGenConfig
+    )
     ds = load_validation_set(args.validation_set, logger)
 
     inspect_attention(
