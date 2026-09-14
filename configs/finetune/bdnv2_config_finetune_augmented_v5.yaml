@@ -1,0 +1,133 @@
+# BDNV2 Dataset Finetuning Configuration — v5 CFG model (multi-token conditioning)
+# Uses modeling_novomolgen_infonce_120225_v5:
+#   - Deterministic ligand encoder (mu only, no VAE reparameterisation)
+#   - Classifier-free guidance (CFG) dropout: ligand token replaced by
+#     learnable null_ligand_emb with probability ligand_drop_prob during training
+#   - No KL loss
+#   - cfg_scale > 1.0 at inference amplifies ligand conditioning signal
+#   - Multi-token conditioning: protein and ligand are each projected into
+#     n_protein_tokens / n_ligand_tokens cross-attention tokens (v4 used 1 each)
+# Dataset: 5x SAFE-augmented scaffold split (bdnv2).
+
+# Ablation
+ablate_ifp: false
+
+# Model configuration
+pretrained_path: "models/novomolgen_300M_YB/checkpoint-309520"
+enable_cross_attn: true
+cross_layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+train_new_modules_only: false
+enable_lora: false
+cond_tokens_len: 256          # VAE latent / condition token dim (was 768 by mistake)
+# v5 multi-token conditioning — set both to 1 to reproduce v4 exactly.
+# These were previously implicit: the v5 runs inherited 4/4 from the
+# NovoMolGenConfig defaults, and finetune_full.py keys v5 selection off
+# n_protein_tokens being present, so omitting them now loads v4.
+n_protein_tokens: 4           # protein condition → 4 cross-attention tokens
+n_ligand_tokens: 4            # ligand condition → 4 cross-attention tokens
+ligand_vec_stats_path: "finetune_data/processed_data/hf_bdnv2_dataset_augmented/ligand_stats.pt"
+lora_r: 8
+lora_alpha: 16
+lora_dropout: 0.05
+
+# CFG training parameters
+ligand_drop_prob: 0.5         # Probability of dropping ligand token per sample during training
+
+# InfoNCE disabled (replaced by Tanimoto for CFG training)
+infonce_weight: 0.0
+infonce_temperature: 0.2
+
+# Tanimoto loss (preferred over InfoNCE for CFG: acts on mu, no contradictory gradients for dropped samples)
+tanimoto_weight: 0.1
+tanimoto_fp_radius: 2
+tanimoto_fp_bits: 2048
+tanimoto_use_mu: true
+
+# Data configuration - use AUGMENTED dataset
+# Note: Create this dataset first using:
+#   python scripts/data_processing/10_augment_safe_representations.py \
+#       --input_path finetune_data/crossdock_dataset/hf_dataset_crossdock/train \
+#       --output_path finetune_data/crossdock_dataset/hf_dataset_crossdock_augmented/train \
+#       --num_versions 5 --seed 42
+dataset_name: "finetune_data/processed_data_scaffold_splitting/hf_dataset_augmented/train"
+tokenizer_path: "./data/tokenizers/tokenizer_bpe_None_SAFE_500_0_0.1.json"
+mol_type: "SAFE"
+max_seq_length: 64  # Alias for max_length, used by MolDataModule
+num_proc: 8
+streaming: false
+# Note: Validation set is NOT augmented (use original for consistent evaluation)
+validation_set_names: ["finetune_data/processed_data/hf_bdnv2_dataset_augmented/validation"]
+filter_validation_set: false
+include_condition_features: true  # Enable condition features (pocket_vec, evo_vec, ifp, ligand_vec)
+latent_dim: 128
+device: "cuda"
+
+# Flag to use augmented data module (with pre-computed SAFE support)
+use_augmented_data_module: true
+
+# Training configuration (based on pretrain config)
+# With 5x augmented data, adjust epochs: 50/5 = 10 epochs for same total updates
+# Or keep 50 epochs for 5x more training
+bf16: true
+bf16_full_eval: true  # Use bf16 for evaluation
+tf32: true  # Enable TensorFloat-32 for faster training on Ampere GPUs
+dataloader_drop_last: true  # Drop last incomplete batch
+dataloader_num_workers: 50  # Number of data loading workers
+dataloader_pin_memory: true  # Pin memory for faster GPU transfer
+do_train: true
+do_eval: true  # Enable evaluation during training
+evaluation_strategy: "steps"  # Evaluation strategy: "no", "steps", "epoch"
+eval_stieps: 5000  # Evaluate every N steps
+optim: "adamw_torch"  # Optimizer type: "adamw_torch", "adamw_hf", etc.
+adam_beta1: 0.9  # Adam beta1 parameter
+adam_beta2: 0.95  # Adam beta2 parameter
+learning_rate: 5e-5  # Learning rate (lower for finetuning)
+weight_decay: 0.01  # Weight decay for regularization
+max_grad_norm: 5.0  # Gradient clipping threshold
+lr_scheduler_type: "cosine"  # LR scheduler: "linear", "cosine", "cosine_with_restarts", etc.
+warmup_ratio: 0.1  # Warmup ratio (10% of training for warmup)
+num_train_epochs: 10  # Adjusted for 5x augmented data (50/5 = 10 for same total updates)
+gradient_accumulation_steps: 4  # Gradient accumulation steps
+gradient_checkpointing: false  # Enable gradient checkpointing to save memory
+per_device_train_batch_size: 250  # Batch size per device
+per_device_eval_batch_size: 228  # Evaluation batch size per device (must be <= validation set size)
+total_batch_size: 1000  # Total batch size = per_device_train_batch_size * gradient_accumulation_steps * num_gpus
+logging_steps: 10  # Log every N steps
+log_on_each_node: false  # Log on each node in distributed training
+save_strategy: "steps"  # Save strategy: "no", "steps", "epoch", "steps"
+save_steps: 3000  # Save checkpoint every N steps
+save_total_limit: 15  # Maximum number of checkpoints to keep
+save_spec_steps: 12000 # Save special checkpoints every N steps
+save_safetensors: false  # Save in SafeTensors format
+push_spec_checkpoints: false  # Push special checkpoints to Hub
+repo_id: null  # HuggingFace Hub repository ID (set to null to disable)
+hub_private_repo: true  # Make Hub repository private
+hub_token: null  # HuggingFace Hub token (can be set via environment variable HF_TOKEN)
+torch_compile: false  # Enable torch.compile for faster training (PyTorch 2.0+)
+include_num_input_tokens_seen: true  # Include number of input tokens seen in training state
+remove_unused_columns: false  # Remove unused columns from dataset
+report_to: ["wandb"]  # Reporting integrations: ["wandb", "tensorboard", etc.]
+
+# Run configuration
+run_name: "bdnv2_300M_lr5e-5_cfg0.5_tani0.1_xattn_cond256_augmented_scaffold_split_v5"
+
+# Logging
+wandb_logs: true  # Set to true if you want to use Weights & Biases
+
+# Random seed for reproducibility
+seed: 2025
+
+# === VAE / KL annealing — DISABLED in v4/v5 (no KL loss) ===
+vae:
+  beta_kl_init: 0
+  beta_kl_final: 0            # KL weight = 0: no KL loss in v4/v5
+  beta_kl_anneal_type: "linear"
+  beta_kl_anneal_steps: 30000
+  beta_kl_eval: 0
+
+# === Progressive unfreezing configuration ===
+# Progressive unfreezing: gradually unfreeze top transformer layers during training
+progressive_unfreezing:
+  enabled: false  # Set to true to enable progressive unfreezing
+  layers_to_unfreeze: [11, 10, 9, 8, 7, 6, 5, 4]
+  unfreeze_steps: [1, 1, 1, 1, 1, 1, 1, 1]

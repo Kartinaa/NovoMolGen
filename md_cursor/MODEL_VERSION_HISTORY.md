@@ -12,7 +12,7 @@ All versions share the same base: `novomolgen_300M_YB/checkpoint-309520` (Mamba-
 | v1/v2 | `modeling_novomolgen_infonce_120225.py` | Baseline cross-attention + VAE + InfoNCE | `bdnv2_config_finetune_augmented.yaml` |
 | v3 | `modeling_novomolgen_infonce_120225_v3.py` | mu instead of sampled z for ligand token | — |
 | v4 | `modeling_novomolgen_infonce_120225_v4.py` | CFG training + null ligand token + Tanimoto loss | `bdnv2_config_finetune_augmented_v4.yaml` |
-| v5 | `modeling_novomolgen_infonce_120225_v5.py` | Multi-token conditioning (protein/ligand → 4 tokens each) | `bdnv2_config_finetune_augmented_v4.yaml` (misnamed; gitignored) |
+| v5 | `modeling_novomolgen_infonce_120225_v5.py` | Multi-token conditioning (protein/ligand → 4 tokens each) | `bdnv2_config_finetune_augmented_v5.yaml` |
 
 ---
 
@@ -224,8 +224,8 @@ correctly controls the encoder bottleneck. 256 is chosen because:
 ## v5 — Multi-Token Conditioning
 
 **File:** `src/models/modeling_novomolgen_infonce_120225_v5.py`
-**Config:** `configs/finetune/bdnv2_config_finetune_augmented_v4.yaml` (misnamed — see "Config Gotcha" below)
-**Training script:** `scripts/finetune_full_depot.py`
+**Config:** `configs/finetune/bdnv2_config_finetune_augmented_v5.yaml`
+**Training script:** `scripts/finetune_full_depot.py` for the original runs — see "Config Gotcha" below
 
 ### Key Change vs v4
 
@@ -287,14 +287,19 @@ not by the yaml:
 | `scripts/finetune_full_depot.py` — used for the v5 runs (trained off-site) | imports v5 unconditionally for any CFG config, but aliases it `V4Model` and prints `Using v4 CFG model` |
 | `scripts/finetune_full.py` — current | `is_v5 = "n_protein_tokens" in config`, so this yaml selects **v4** |
 
-Re-running the v5 config with the current `finetune_full.py` therefore reproduces **v4**,
-not v5. To reproduce v5, either use `finetune_full_depot.py`, or add `n_protein_tokens: 4`
-and `n_ligand_tokens: 4` to the yaml.
+Re-running the v4-named yaml with the current `finetune_full.py` therefore reproduces
+**v4**, not v5.
 
-Note also that `configs/finetune/.gitignore` is `*`: every `bdnv2_*` config is untracked,
-so the configs in git are not the configs that produced the models. The authoritative
-record of any run stays the `training_config.yaml` + `config.json` inside its
-`full_model/` directory.
+**Resolution:** `configs/finetune/bdnv2_config_finetune_augmented_v5.yaml` is that same
+config with `n_protein_tokens: 4` and `n_ligand_tokens: 4` written out explicitly — the
+only value differences between the two files; everything else is comments. The current
+`finetune_full.py` selects v5 from it. Use it for new v5 runs. The v4-named file is left
+untouched as the byte-identical record of what the 050826 run consumed.
+
+Note that `configs/finetune/.gitignore` is `*`, so the other `bdnv2_*` configs are
+untracked — the configs in git are generally not the configs that produced the models
+(the v5 yaml is force-added as an exception). The authoritative record of any run stays
+the `training_config.yaml` + `config.json` inside its `full_model/` directory.
 
 ### Benchmark Checkpoints (v5)
 
@@ -360,9 +365,10 @@ src/models/
 
 configs/finetune/
 ├── bdnv2_config_finetune_augmented.yaml       # v2 config
-├── bdnv2_config_finetune_augmented_v4.yaml    # misnamed: actually the v5 run config (050826; drop0.5, tani0.1)
+├── bdnv2_config_finetune_augmented_v4.yaml    # misnamed: the config the 050826 v5 run consumed
+├── bdnv2_config_finetune_augmented_v5.yaml    # same + explicit n_protein_tokens/n_ligand_tokens (tracked)
 └── bdnv2_config_finetune_v4_xdock_aug.yaml    # CrossDocked (augmented) base config
-    # all bdnv2_* configs are gitignored (configs/finetune/.gitignore is `*`)
+    # .gitignore here is `*`; only the v5 yaml is force-added
 
 scripts/
 ├── finetune_full_depot.py                     # trained the v5 runs: hard-imports v5 (labelled "v4")
