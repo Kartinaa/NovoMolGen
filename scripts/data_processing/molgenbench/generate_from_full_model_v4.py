@@ -393,6 +393,50 @@ def generate_molecules_for_validation_set(
     return all_generated, all_condition_info, conversion_stats
 
 
+def validate_cfg_args(args, logger: logging.Logger) -> None:
+    """檢查 CFG 相關 flag 的合法組合，避免靜默 no-op 或語意誤導。
+
+    對於會產生誤導性結果的組合直接 raise；對於可解但要小心解讀的組合 log warning。
+    """
+    # Hard error: protein_only + CFG 是 silent no-op。
+    # protein-only 分支的 ligand token 已經是 null_ligand_emb；CFG 分支的
+    # uncond_tokens 也用同一個 null_ligand_emb，兩者完全相同，
+    # logits_cond - logits_uncond == 0，CFG 不提供訊號但仍付 2x forward 成本。
+    if args.protein_only and args.cfg_scale > 1.0:
+        raise ValueError(
+            "protein_only=True 與 cfg_scale>1.0 衝突：cond/uncond 兩條路徑都使用 "
+            "null_ligand_emb，CFG 訊號恆為 0。請擇一：(1) 純 protein-only 生成 → "
+            "保留 --protein_only 並設 --cfg_scale 1.0；(2) 想做 CFG → 拿掉 --protein_only。"
+        )
+
+    # Soft warning: cond_ablation 搭配 CFG 會放大「退化/錯位 condition」方向。
+    if args.cond_ablation in {"zero", "shuffle"} and args.cfg_scale > 1.0:
+        logger.warning(
+            f"cond_ablation='{args.cond_ablation}' + cfg_scale={args.cfg_scale}: "
+            f"conditional 路徑使用 ablated 條件，CFG 將放大「ablated cond vs null」"
+            f"的差異而非真實 ligand 訊號。此 run 僅適合 ablation 比較，不要與正常 "
+            f"CFG runs 混合分析。"
+        )
+
+    # Soft warning: ifp_ablation 搭配 CFG 也會偏離原本的 CFG 語意。
+    if args.ifp_ablation in {"zero", "shuffle"} and args.cfg_scale > 1.0 and args.cond_ablation == "none":
+        logger.warning(
+            f"ifp_ablation='{args.ifp_ablation}' + cfg_scale={args.cfg_scale}: "
+            f"ligand encoder 收到的 IFP 已被破壞，產生的 mu 已偏離正常分布，"
+            f"CFG 放大方向會偏移。注意結果解讀。"
+        )
+
+    # Perf note: CFG path 已優化為 doubled-batch + KV cache，速度約為 cfg_scale=1.0
+    # 的 0.4 ~ 0.6x（理論下限 0.5x — batch 翻倍）。GPU 記憶體用量也約為 2x baseline，
+    # OOM 時請降低 --batch_size。
+    if args.cfg_scale > 1.0:
+        logger.info(
+            f"CFG enabled (cfg_scale={args.cfg_scale}): 已啟用 doubled-batch + KV cache 優化，"
+            f"速度約為 cfg_scale=1.0 的 0.4 ~ 0.6x，GPU 記憶體 ~2x baseline。"
+            f"OOM 時請降低 --batch_size。"
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate molecules from v4 model for MolGenBench")
     parser.add_argument("--model_path",          type=str, required=True)
@@ -419,17 +463,31 @@ def main():
     # v4-specific
     parser.add_argument(
         "--cfg_scale", type=float, default=1.0,
-        help="Classifier-free guidance scale (default 1.0 = no CFG; >1.0 enables CFG)",
+        help=(
+            "Classifier-free guidance scale (default 1.0 = no CFG; >1.0 enables CFG). "
+            "Typical: 1.5-3.0. "
+            "效能：已啟用 doubled-batch + KV cache 優化，速度約為 cfg_scale=1.0 的 0.4 ~ 0.6x，"
+            "GPU 記憶體 ~2x baseline。 "
+            "與 --protein_only 互斥（uncond/cond 同 null_emb，CFG 訊號為 0）。"
+        ),
     )
     parser.add_argument(
         "--protein_only", action="store_true",
-        help="Generate with protein condition only (ligand replaced with null_ligand_emb)",
+        help=(
+            "Generate with protein condition only (ligand replaced with null_ligand_emb). "
+            "與 --cfg_scale>1.0 互斥：protein-only 下 cond/uncond 兩條路徑都用 null_ligand_emb，"
+            "CFG 訊號恆為 0。"
+        ),
     )
 
     args = parser.parse_args()
     set_seed(args.seed)
 
     logger = setup_logging(args.log_level)
+
+    # Validate CFG-related flag combinations early — fail fast before loading model.
+    validate_cfg_args(args, logger)
+
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 

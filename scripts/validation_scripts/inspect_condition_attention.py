@@ -304,8 +304,18 @@ def inspect_attention(
     restore_adapters(model)
 
     # 4. Report per-layer attention metrics
+    # Detect whether the model uses multi-token conditions (v5+) or single-token (v4)
+    cfg = model.base_config if hasattr(model, "base_config") else model.config
+    n_protein_tokens = int(getattr(cfg, "n_protein_tokens", 1))
+    n_ligand_tokens  = int(getattr(cfg, "n_ligand_tokens",  1))
+    n_cond_tokens    = n_protein_tokens + n_ligand_tokens
+
     logger.info("\n" + "=" * 60)
-    logger.info("Cross-attention condition usage  (v2: token 0=protein, token 1=ligand)")
+    logger.info(
+        f"Cross-attention condition usage  "
+        f"(protein tokens: 0–{n_protein_tokens-1}, "
+        f"ligand tokens: {n_protein_tokens}–{n_cond_tokens-1})"
+    )
     logger.info(f"Averaged over all {num_samples} samples × attention heads × sequence positions")
     logger.info("=" * 60)
     logger.info(
@@ -325,12 +335,12 @@ def inspect_attention(
         # Average attention weights: mean of per-batch means
         # Each batch already averaged over [B, H, T], so this is the global average
         w_avg = store["weights_sum"] / store["weights_count"]   # [Lc]
-        if w_avg.shape[0] >= 2:
-            prot_w = float(w_avg[0].item())
-            lig_w  = float(w_avg[1].item())
-        else:
-            prot_w = float(w_avg[0].item())
-            lig_w  = float("nan")
+        Lc = w_avg.shape[0]
+        # Sum over all protein tokens and all ligand tokens respectively
+        prot_end = min(n_protein_tokens, Lc)
+        lig_end  = min(n_cond_tokens,    Lc)
+        prot_w = float(w_avg[:prot_end].sum().item())
+        lig_w  = float(w_avg[n_protein_tokens:lig_end].sum().item()) if n_protein_tokens < Lc else float("nan")
 
         # Mean norms (averaged the same way: mean of per-batch means)
         attn_norm  = store["out_norm_sum"]   / store["out_norm_count"]    # cross-attn output
@@ -354,8 +364,8 @@ def inspect_attention(
     logger.info("=" * 75)
     logger.info("說明：")
     logger.info("  gate       : sigmoid(gate)，cross-attn輸出加入主幹的係數")
-    logger.info("  protein%   : 注意力分配給protein token的比例（所有樣本×head×位置的平均）")
-    logger.info("  ligand%    : 注意力分配給ligand  token的比例")
+    logger.info(f"  protein%   : 注意力分配給全部 {n_protein_tokens} 個 protein token 的總比例")
+    logger.info(f"  ligand%    : 注意力分配給全部 {n_ligand_tokens} 個 ligand  token 的總比例")
     logger.info("  query_norm : hidden_states（經過layer norm後）的平均L2範數 = main stream強度")
     logger.info("  attn_norm  : cross-attn輸出的平均L2範數（gate施加前）")
     logger.info("  eff_norm   : gate × attn_norm，實際注入residual stream的信號大小")

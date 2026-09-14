@@ -41,15 +41,15 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from datasets.config import HF_CACHE_HOME
 from datasets import load_dataset
 
-# Set up the project root
-rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
+# Set up the project root (capture return so data-file paths don't depend on CWD)
+_PROJECT_ROOT = rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
 from src.eval.components import npscorer, sascorer  # noqa
 from src.eval.utils import get_mol, mapper  # noqa
 
 # Read drug filters
-_mcf = pd.read_csv(os.path.join("./data/filters", "mcf.csv"))
-_pains = pd.read_csv(os.path.join("./data/filters", "wehi_pains.csv"), names=["smarts", "names"])
+_mcf = pd.read_csv(str(_PROJECT_ROOT / "data/filters/mcf.csv"))
+_pains = pd.read_csv(str(_PROJECT_ROOT / "data/filters/wehi_pains.csv"), names=["smarts", "names"])
 _filters = [
     Chem.MolFromSmarts(x)
     for x in pd.concat([_mcf, _pains], ignore_index=True, sort=True)["smarts"].values

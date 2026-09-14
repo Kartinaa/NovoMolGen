@@ -96,6 +96,24 @@ def _parse_pdb_atoms(pdb_path: str) -> pd.DataFrame:
     return pd.DataFrame(atoms)
 
 
+# Amber / CHARMM protonation-state variants that RDKit / ODDT do not recognize.
+# Map them back to the standard PDB residue name so downstream parsers (PLEC,
+# UniMol pocket, etc.) can apply the correct bond templates.
+NONSTANDARD_RESIDUE_ALIASES = {
+    "HIE": "HIS", "HID": "HIS", "HIP": "HIS", "HSE": "HIS", "HSD": "HIS", "HSP": "HIS",
+    "CYX": "CYS", "CYM": "CYS",
+    "ASH": "ASP", "GLH": "GLU", "LYN": "LYS",
+}
+
+
+def _normalize_residue_names(df: pd.DataFrame) -> pd.DataFrame:
+    """Rewrite Amber/CHARMM-style residue names (HIE, CYX, ...) to standard PDB names."""
+    if df.empty or 'residue_name' not in df.columns:
+        return df
+    df['residue_name'] = df['residue_name'].replace(NONSTANDARD_RESIDUE_ALIASES)
+    return df
+
+
 def _write_pdb_atoms(df: pd.DataFrame, output_path: str) -> None:
     """
     将DataFrame写入PDB文件（仅ATOM记录）。
@@ -106,22 +124,25 @@ def _write_pdb_atoms(df: pd.DataFrame, output_path: str) -> None:
     """
     with open(output_path, 'w') as f:
         for _, row in df.iterrows():
-            # Format ATOM record according to PDB format
+            # Format ATOM record according to fixed-column PDB spec (80 chars/line).
+            # alt_loc / chain_id / insertion are single-char fields; strip() from the
+            # parser can turn them into empty strings, so force width 1 here to avoid
+            # left-shifting downstream fields (occupancy, temp_factor, element).
             record = "ATOM  "
             serial = f"{int(row['atom_serial']):5d}"
             name = f"{row['atom_name']:>4s}"
-            alt_loc = row.get('alt_loc', ' ') if 'alt_loc' in row else ' '
+            alt_loc = f"{(row.get('alt_loc') or ' '):<1s}"
             res_name = f"{row['residue_name']:>3s}"
-            chain_id = row.get('chain_id', ' ') if 'chain_id' in row else ' '
+            chain_id = f"{(row.get('chain_id') or ' '):<1s}"
             res_seq = f"{int(row['residue_number']):4d}"
-            i_code = row.get('insertion', ' ') if 'insertion' in row else ' '
+            i_code = f"{(row.get('insertion') or ' '):<1s}"
             x = f"{row['x_coord']:8.3f}"
             y = f"{row['y_coord']:8.3f}"
             z = f"{row['z_coord']:8.3f}"
             occ = f"{row.get('occupancy', 1.0):6.2f}" if 'occupancy' in row else "  1.00"
             temp = f"{row.get('temp_factor', 0.0):6.2f}" if 'temp_factor' in row else "  0.00"
-            element = f"{row.get('element_symbol', ''):>2s}" if 'element_symbol' in row else "  "
-            
+            element = f"{(row.get('element_symbol') or ''):>2s}"
+
             line = f"{record}{serial} {name}{alt_loc}{res_name} {chain_id}{res_seq}{i_code}   {x}{y}{z}{occ}{temp}          {element}\n"
             f.write(line)
         f.write("END\n")
@@ -151,9 +172,14 @@ def extract_pocket_from_pdb_with_ligand(
     """
     # Read PDB
     atom_df = _parse_pdb_atoms(pdb_path)
-    # Only keep ATOM records (not HETATM)
-    atom_df = atom_df[atom_df['record_type'] == 'ATOM'].copy()
-    
+    # Only keep ATOM records (not HETATM). reset_index so downstream boolean
+    # masks (e.g. is_water) and RangeIndex-based Series from build_residue_keys
+    # stay aligned — interleaved HETATM records (e.g. ACE/NMA caps) otherwise
+    # leave gaps in atom_df.index.
+    atom_df = _normalize_residue_names(
+        atom_df[atom_df['record_type'] == 'ATOM'].copy().reset_index(drop=True)
+    )
+
     if atom_df.empty:
         raise ValueError(f"No ATOM records found in {pdb_path}")
     
@@ -233,7 +259,9 @@ def separate_receptor_pdb(
     
     # Read PDB and filter only ATOM records
     atom_df = _parse_pdb_atoms(pdb_path)
-    atom_df = atom_df[atom_df['record_type'] == 'ATOM'].copy()
+    atom_df = _normalize_residue_names(
+        atom_df[atom_df['record_type'] == 'ATOM'].copy().reset_index(drop=True)
+    )
     
     # Save only ATOM records
     _write_pdb_atoms(atom_df, str(output_path))

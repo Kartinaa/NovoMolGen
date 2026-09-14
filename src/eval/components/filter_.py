@@ -17,8 +17,8 @@ from rdkit.Chem.Crippen import MolLogP  # type: ignore
 from rdkit.Chem.Descriptors import ExactMolWt  # type: ignore
 from rdkit.Chem.Lipinski import NumHAcceptors, NumHDonors  # type: ignore
 
-# Set up the project root
-rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
+# Set up the project root (capture return so data-file paths don't depend on CWD)
+_PROJECT_ROOT = rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
 from src.eval.components.moses import SA  # noqa
 from src.eval.utils import disable_rdkit_log  # noqa
@@ -26,14 +26,14 @@ from src.eval.utils import disable_rdkit_log  # noqa
 disable_rdkit_log()
 
 # Read drug filters
-_mcf = pd.read_csv(os.path.join("./data/filters", "mcf.csv"))
-_pains = pd.read_csv(os.path.join("./data/filters", "wehi_pains.csv"), names=["smarts", "names"])
+_mcf = pd.read_csv(str(_PROJECT_ROOT / "data/filters/mcf.csv"))
+_pains = pd.read_csv(str(_PROJECT_ROOT / "data/filters/wehi_pains.csv"), names=["smarts", "names"])
 _filters = [
     Chem.MolFromSmarts(x)
     for x in pd.concat([_mcf, _pains], ignore_index=True, sort=True)["smarts"].values
 ]
 
-inf = open(os.path.join("./data/filters", "pains.txt"))
+inf = open(str(_PROJECT_ROOT / "data/filters/pains.txt"))
 sub_strct = [line.rstrip().split(" ") for line in inf]
 smarts = [line[0] for line in sub_strct]
 desc = [line[1] for line in sub_strct]

@@ -22,15 +22,40 @@ import random
 import torch
 import yaml
 from datasets import load_from_disk, load_dataset, Features, Value, Sequence
+from rdkit import Chem
 from tqdm import tqdm
 
 # Add src to path
 sys.path.append(str(Path(__file__).parent.parent / "src"))
 
-from models.modeling_novomolgen_infonce_120225 import NovoMolGen, NovoMolGenConfig
 from data_loader.molecule_tokenizer import MoleculeTokenizer
 from data_loader.utils import safe_to_smiles
 from transformers import AutoTokenizer
+
+
+def _import_model_class(model_path: str):
+    """Auto-detect model variant from the .py file saved alongside checkpoint weights.
+
+    Reads the filename from the checkpoint directory to identify the variant, then
+    imports from src/models/ (which has the correct package context for relative
+    imports like `from .condition import ...`).
+    """
+    import importlib
+    model_dir = Path(model_path)
+    py_files = sorted(model_dir.glob("modeling_novomolgen*.py"))
+    if py_files:
+        chosen = py_files[0]
+        module_name = chosen.stem
+        print(f"[auto-detect] Loading model class from: {chosen.name}")
+        try:
+            mod = importlib.import_module(f"models.{module_name}")
+            return mod.NovoMolGen, mod.NovoMolGenConfig
+        except ImportError as e:
+            print(f"[auto-detect] Warning: could not import models.{module_name}: {e}")
+            print("[auto-detect] Falling back to v4 default.")
+    print("[auto-detect] No modeling_novomolgen*.py found in checkpoint; falling back to v4.")
+    from models.modeling_novomolgen_infonce_120225_v5 import NovoMolGen, NovoMolGenConfig
+    return NovoMolGen, NovoMolGenConfig
 
 
 def set_seed(seed: int) -> None:
@@ -59,9 +84,10 @@ def setup_logging(log_level: str = "INFO") -> logging.Logger:
 def load_model_and_tokenizer(model_path: str, logger: logging.Logger):
     """Load model and tokenizer from full_model directory."""
     model_path = Path(model_path)
-    
     logger.info(f"Loading model from: {model_path}")
-    
+
+    NovoMolGen, NovoMolGenConfig = _import_model_class(str(model_path))
+
     # Load config
     config = NovoMolGenConfig.from_pretrained(str(model_path))
     logger.info(f"Model config: enable_cross_attn={config.enable_cross_attn}, cross_layers={config.cross_layers}")
@@ -191,7 +217,7 @@ def load_validation_sets(validation_set_paths: Union[str, List[str]], logger: lo
 
 
 def generate_molecules_for_validation_set(
-    model: NovoMolGen,
+    model,
     tokenizer,
     validation_set,
     num_samples: int,
@@ -206,6 +232,8 @@ def generate_molecules_for_validation_set(
     max_retries: int = 10,
     ifp_ablation: str = "none",
     cond_ablation: str = "none",
+    cfg_scale: float = 1.0,
+    protein_only: bool = False,
 ):
     """Generate molecules for a validation set using condition features.
     
@@ -228,7 +256,8 @@ def generate_molecules_for_validation_set(
         "conversion_failed": 0,     # Failed conversions (exceptions)
         "conversion_empty": 0,      # Conversions that returned empty/None
         "conversion_fragments": 0,  # Conversions that resulted in fragments (containing '.')
-        "conversion_success": 0,    # Successful conversions
+        "conversion_success": 0,    # Successful conversions (unique)
+        "conversion_duplicate": 0,  # Valid but duplicate canonical SMILES (skipped)
     }
     
     # Check if condition features are available
@@ -331,6 +360,7 @@ def generate_molecules_for_validation_set(
             # Generate num_samples molecules for this validation sample
             # Keep generating until we have exactly num_samples valid SMILES
             samples_generated_for_this_val = []
+            seen_canonical: set[str] = set()   # dedup by canonical SMILES
             attempt = 0
             max_total_attempts = max_retries * (num_samples // batch_size + 1)
             
@@ -341,36 +371,38 @@ def generate_molecules_for_validation_set(
                 # Repeat condition features for batch
                 pocket_vec_batch = pocket_vec.repeat(current_batch_size, 1)
                 evo_vec_batch = evo_vec.repeat(current_batch_size, 1)
-                ifp_batch = ifp.repeat(current_batch_size, 1)
-                ligand_vec_batch = ligand_vec.repeat(current_batch_size, 1)
+                # protein_only: pass None so the model substitutes null_ligand_emb
+                ifp_batch        = None if protein_only else ifp.repeat(current_batch_size, 1)
+                ligand_vec_batch = None if protein_only else ligand_vec.repeat(current_batch_size, 1)
 
-                # Global condition ablation (applies to all condition vectors together)
-                if cond_ablation == "zero":
-                    # Set ALL condition vectors to zero: effectively unconditional
-                    pocket_vec_batch = torch.zeros_like(pocket_vec_batch)
-                    evo_vec_batch = torch.zeros_like(evo_vec_batch)
-                    ifp_batch = torch.zeros_like(ifp_batch)
-                    ligand_vec_batch = torch.zeros_like(ligand_vec_batch)
-                elif cond_ablation == "shuffle":
-                    # Shuffle ALL condition vectors within the batch using the SAME permutation,
-                    # so their mutual alignment is preserved but broken w.r.t. current sample.
-                    perm = torch.randperm(current_batch_size, device=device)
-                    pocket_vec_batch = pocket_vec_batch[perm]
-                    evo_vec_batch = evo_vec_batch[perm]
-                    ifp_batch = ifp_batch[perm]
-                    ligand_vec_batch = ligand_vec_batch[perm]
-
-                # If no global ablation, still allow IFP-only ablation for backwards compatibility
-                if cond_ablation == "none":
-                    if ifp_ablation == "zero":
-                        # Extreme ablation: completely remove IFP information
+                if not protein_only:
+                    # Global condition ablation (applies to all condition vectors together)
+                    if cond_ablation == "zero":
+                        # Set ALL condition vectors to zero: effectively unconditional
+                        pocket_vec_batch = torch.zeros_like(pocket_vec_batch)
+                        evo_vec_batch = torch.zeros_like(evo_vec_batch)
                         ifp_batch = torch.zeros_like(ifp_batch)
-                    elif ifp_ablation == "shuffle":
-                        # Distribution-preserving ablation:
-                        # shuffle IFP vectors within the batch so that they no longer
-                        # correspond to the current ligand, but keep global statistics
-                        perm_ifp = torch.randperm(current_batch_size, device=device)
-                        ifp_batch = ifp_batch[perm_ifp]
+                        ligand_vec_batch = torch.zeros_like(ligand_vec_batch)
+                    elif cond_ablation == "shuffle":
+                        # Shuffle ALL condition vectors within the batch using the SAME permutation,
+                        # so their mutual alignment is preserved but broken w.r.t. current sample.
+                        perm = torch.randperm(current_batch_size, device=device)
+                        pocket_vec_batch = pocket_vec_batch[perm]
+                        evo_vec_batch = evo_vec_batch[perm]
+                        ifp_batch = ifp_batch[perm]
+                        ligand_vec_batch = ligand_vec_batch[perm]
+
+                    # If no global ablation, still allow IFP-only ablation for backwards compatibility
+                    if cond_ablation == "none":
+                        if ifp_ablation == "zero":
+                            # Extreme ablation: completely remove IFP information
+                            ifp_batch = torch.zeros_like(ifp_batch)
+                        elif ifp_ablation == "shuffle":
+                            # Distribution-preserving ablation:
+                            # shuffle IFP vectors within the batch so that they no longer
+                            # correspond to the current ligand, but keep global statistics
+                            perm_ifp = torch.randperm(current_batch_size, device=device)
+                            ifp_batch = ifp_batch[perm_ifp]
                 
                 # Generate using condition features
                 with torch.no_grad():
@@ -390,12 +422,12 @@ def generate_molecules_for_validation_set(
                                 ifp=ifp_batch,
                                 ligand_vec=ligand_vec_batch,
                                 sample_posterior=sample_posterior,
+                                cfg_scale=cfg_scale,
                                 max_length=max_length,
                                 temperature=temperature,
                                 top_k=top_k,
                                 top_p=top_p,
                                 eos_token_id=tokenizer.eos_token_id,
-                                # pad_token_id is not supported by flash_attn's generate(), removed
                             )
                     else:
                         # For CPU or float32, no autocast needed
@@ -406,12 +438,12 @@ def generate_molecules_for_validation_set(
                             ifp=ifp_batch,
                             ligand_vec=ligand_vec_batch,
                             sample_posterior=sample_posterior,
+                            cfg_scale=cfg_scale,
                             max_length=max_length,
                             temperature=temperature,
                             top_k=top_k,
                             top_p=top_p,
                             eos_token_id=tokenizer.eos_token_id,
-                            # pad_token_id is not supported by flash_attn's generate(), removed
                         )
                 
                 # Decode sequences
@@ -435,8 +467,13 @@ def generate_molecules_for_validation_set(
                     try:
                         smiles = safe_to_smiles(safe_str)
                         if smiles and '.' not in smiles:  # Only add if conversion succeeded and no fragments
-                            samples_generated_for_this_val.append(smiles)
-                            conversion_stats["conversion_success"] += 1
+                            canon = Chem.MolToSmiles(Chem.MolFromSmiles(smiles))
+                            if canon not in seen_canonical:
+                                seen_canonical.add(canon)
+                                samples_generated_for_this_val.append(smiles)
+                                conversion_stats["conversion_success"] += 1
+                            else:
+                                conversion_stats["conversion_duplicate"] += 1
                         elif not smiles:
                             # Conversion returned None or empty string
                             conversion_stats["conversion_empty"] += 1
@@ -468,7 +505,8 @@ def generate_molecules_for_validation_set(
         # Log conversion statistics for conditional generation
         logger.info(f"\n  Overall conversion statistics:")
         logger.info(f"    Total SAFE generated: {conversion_stats['total_safe_generated']}")
-        logger.info(f"    Successful conversions: {conversion_stats['conversion_success']}")
+        logger.info(f"    Successful conversions (unique): {conversion_stats['conversion_success']}")
+        logger.info(f"    Duplicate (skipped): {conversion_stats['conversion_duplicate']}")
         logger.info(f"    Failed conversions (exceptions): {conversion_stats['conversion_failed']}")
         logger.info(f"    Empty conversions: {conversion_stats['conversion_empty']}")
         logger.info(f"    Fragment conversions: {conversion_stats['conversion_fragments']}")
@@ -525,6 +563,27 @@ def main():
         ),
     )
     parser.add_argument(
+        "--cfg_scale",
+        type=float,
+        default=1.0,
+        help=(
+            "Classifier-Free Guidance scale (v4/v5 models only).\n"
+            "  1.0 = no CFG (default, same as v3 behaviour)\n"
+            " >1.0 = amplify ligand conditioning signal (try 1.5–3.0)"
+        ),
+    )
+    parser.add_argument(
+        "--protein_only",
+        action="store_true",
+        help=(
+            "Generate using protein condition only (pocket_vec + evo_vec).\n"
+            "Passes ifp=None and ligand_vec=None so the model uses its trained\n"
+            "null_ligand_emb token — equivalent to CFG unconditional branch.\n"
+            "Note: --cfg_scale > 1.0 has no effect when --protein_only is set\n"
+            "(both conditional and unconditional branches use null_ligand_emb)."
+        ),
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=2025,
@@ -549,7 +608,17 @@ def main():
     logger.info(f"Output directory: {output_dir}")
     logger.info(f"IFP ablation mode: {args.ifp_ablation}")
     logger.info(f"Global condition ablation mode: {args.cond_ablation}")
-    
+    logger.info(f"CFG scale: {args.cfg_scale}")
+    logger.info(f"Protein-only mode: {args.protein_only}")
+
+    if args.protein_only and args.cfg_scale > 1.0:
+        raise ValueError(
+            "--protein_only and --cfg_scale > 1.0 are incompatible: both the "
+            "conditional and unconditional CFG branches would use null_ligand_emb, "
+            "so the guidance amplification has no effect. Use --cfg_scale 1.0 "
+            "(the default) when running in protein-only mode."
+        )
+
     # Load model and tokenizer
     logger.info("\n" + "=" * 60)
     logger.info("Loading model and tokenizer...")
@@ -593,8 +662,10 @@ def main():
             max_retries=args.max_retries,
             ifp_ablation=args.ifp_ablation,
             cond_ablation=args.cond_ablation,
+            cfg_scale=args.cfg_scale,
+            protein_only=args.protein_only,
         )
-        
+
         logger.info(f"  Generated {len(generated_molecules)} valid SMILES molecules")
         
         # Save results
@@ -613,6 +684,8 @@ def main():
                 "top_p": args.top_p,
                 "ifp_ablation": args.ifp_ablation,
                 "cond_ablation": args.cond_ablation,
+                "cfg_scale": args.cfg_scale,
+                "protein_only": args.protein_only,
             }
         }
         

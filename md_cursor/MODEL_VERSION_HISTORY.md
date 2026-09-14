@@ -12,7 +12,7 @@ All versions share the same base: `novomolgen_300M_YB/checkpoint-309520` (Mamba-
 | v1/v2 | `modeling_novomolgen_infonce_120225.py` | Baseline cross-attention + VAE + InfoNCE | `bdnv2_config_finetune_augmented.yaml` |
 | v3 | `modeling_novomolgen_infonce_120225_v3.py` | mu instead of sampled z for ligand token | — |
 | v4 | `modeling_novomolgen_infonce_120225_v4.py` | CFG training + null ligand token + Tanimoto loss | `bdnv2_config_finetune_augmented_v4.yaml` |
-| v5 | `modeling_novomolgen_infonce_120225_v5.py` | Multi-token conditioning (protein/ligand → 4 tokens each) | none (checkpoint `training_config.yaml` only) |
+| v5 | `modeling_novomolgen_infonce_120225_v5.py` | Multi-token conditioning (protein/ligand → 4 tokens each) | `bdnv2_config_finetune_augmented_v4.yaml` (misnamed; gitignored) |
 
 ---
 
@@ -224,7 +224,8 @@ correctly controls the encoder bottleneck. 256 is chosen because:
 ## v5 — Multi-Token Conditioning
 
 **File:** `src/models/modeling_novomolgen_infonce_120225_v5.py`
-**Config:** no yaml in `configs/finetune/` — see "Config gotcha" below.
+**Config:** `configs/finetune/bdnv2_config_finetune_augmented_v4.yaml` (misnamed — see "Config Gotcha" below)
+**Training script:** `scripts/finetune_full_depot.py`
 
 ### Key Change vs v4
 
@@ -269,13 +270,31 @@ ligand effect:
 This holds only because protein and ligand remain *separate* tokens (no `ConditionFusion`
 MLP) — the same property v3 introduced and v4 relies on.
 
-### Config Gotcha
+### Config Gotcha: the v5 Config Is Named "v4"
 
-There is **no v5 yaml** in `configs/finetune/` (the newest are `*_v4*.yaml`), and
-`n_protein_tokens` / `n_ligand_tokens` appear in **no** config file — every v5 run used
-the class defaults `4 + 4`. The authoritative record of what a v5 run actually used is
-the `training_config.yaml` + `config.json` saved inside each checkpoint's `full_model/`
-directory. Check those, not `configs/`, when reproducing a v5 result.
+The config that trained the 050826 v5 checkpoint is
+`configs/finetune/bdnv2_config_finetune_augmented_v4.yaml`. It is byte-identical to the
+`training_config.yaml` saved inside that checkpoint (the finetune scripts copy the yaml
+verbatim via `shutil.copy2`, so the saved file identifies the config used). Its filename
+and header comments say v4, but it is the v5 config.
+
+It contains **no** `n_protein_tokens` / `n_ligand_tokens` — the v5 runs picked up `4 + 4`
+from the `NovoMolGenConfig` defaults. The v5 class was chosen by the *training script*,
+not by the yaml:
+
+| Training script | Behaviour with this yaml |
+|-----------------|--------------------------|
+| `scripts/finetune_full_depot.py` — used for the v5 runs (trained off-site) | imports v5 unconditionally for any CFG config, but aliases it `V4Model` and prints `Using v4 CFG model` |
+| `scripts/finetune_full.py` — current | `is_v5 = "n_protein_tokens" in config`, so this yaml selects **v4** |
+
+Re-running the v5 config with the current `finetune_full.py` therefore reproduces **v4**,
+not v5. To reproduce v5, either use `finetune_full_depot.py`, or add `n_protein_tokens: 4`
+and `n_ligand_tokens: 4` to the yaml.
+
+Note also that `configs/finetune/.gitignore` is `*`: every `bdnv2_*` config is untracked,
+so the configs in git are not the configs that produced the models. The authoritative
+record of any run stays the `training_config.yaml` + `config.json` inside its
+`full_model/` directory.
 
 ### Benchmark Checkpoints (v5)
 
@@ -341,7 +360,11 @@ src/models/
 
 configs/finetune/
 ├── bdnv2_config_finetune_augmented.yaml       # v2 config
-├── bdnv2_config_finetune_augmented_v4.yaml    # v4 config (cond256, cfg0.3, tani0.1)
-├── bdnv2_config_finetune_v4_xdock_aug.yaml    # v4 CrossDocked (augmented)
-└── (no v5 yaml — v5 settings live only in each checkpoint's training_config.yaml)
+├── bdnv2_config_finetune_augmented_v4.yaml    # misnamed: actually the v5 run config (050826; drop0.5, tani0.1)
+└── bdnv2_config_finetune_v4_xdock_aug.yaml    # CrossDocked (augmented) base config
+    # all bdnv2_* configs are gitignored (configs/finetune/.gitignore is `*`)
+
+scripts/
+├── finetune_full_depot.py                     # trained the v5 runs: hard-imports v5 (labelled "v4")
+└── finetune_full.py                           # current: v5 only if n_protein_tokens is in the config
 ```

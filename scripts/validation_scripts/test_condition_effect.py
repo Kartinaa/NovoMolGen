@@ -23,6 +23,7 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+import importlib.util
 import torch
 from datasets import load_from_disk, load_dataset, Features, Value, Sequence
 import safe  # 用于 SMILES -> SAFE 转换
@@ -31,8 +32,24 @@ import safe  # 用于 SMILES -> SAFE 转换
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT / "src"))
 
-from models.modeling_novomolgen_infonce_120225_dropout import NovoMolGen, NovoMolGenConfig  # type: ignore
 from transformers import AutoTokenizer  # type: ignore
+
+
+def _import_model_class(model_path: str):
+    """Auto-detect model class from .py saved alongside checkpoint weights."""
+    model_dir = Path(model_path)
+    py_files = sorted(model_dir.glob("modeling_novomolgen*.py"))
+    if py_files:
+        chosen = py_files[0]
+        spec = importlib.util.spec_from_file_location("_novomolgen_dyn", chosen)
+        mod = importlib.util.module_from_spec(spec)
+        mod.__package__ = "models"
+        sys.modules.setdefault("models._novomolgen_dyn", mod)
+        spec.loader.exec_module(mod)
+        print(f"[auto-detect] Loaded model class from: {chosen.name}")
+        return mod.NovoMolGen, mod.NovoMolGenConfig
+    from models.modeling_novomolgen_infonce_120225_v5 import NovoMolGen, NovoMolGenConfig
+    return NovoMolGen, NovoMolGenConfig
 
 
 def setup_logging(log_level: str = "INFO") -> logging.Logger:
@@ -53,6 +70,8 @@ def load_model_and_tokenizer(model_path: str, logger: logging.Logger):
     model_path = Path(model_path)
 
     logger.info(f"Loading model from: {model_path}")
+
+    NovoMolGen, NovoMolGenConfig = _import_model_class(str(model_path))
 
     # Load config
     config = NovoMolGenConfig.from_pretrained(str(model_path))
@@ -240,7 +259,7 @@ def make_batch(
 
 @torch.inference_mode()
 def measure_loss_difference(
-    model: NovoMolGen,
+    model,
     ds,
     device: torch.device,
     num_batches: int = 100,
@@ -446,6 +465,23 @@ def main():
 
     # 加载模型和数据
     model, tokenizer, device = load_model_and_tokenizer(args.model_path, logger)
+
+    # Warn if protein shuffle is requested on a protein-ablated model
+    is_protein_abla = not hasattr(model, "protein_encoder")
+    if is_protein_abla:
+        logger.warning(
+            "Protein-ablated model detected (no protein_encoder). "
+            "pocket_vec/evo_vec are IGNORED by this model, so "
+            "--shuffle_mode protein has no effect on loss. "
+            "Only --shuffle_mode ligand gives meaningful signal."
+        )
+        if args.shuffle_mode == "protein":
+            logger.error(
+                "--shuffle_mode protein is meaningless for the protein-ablated model. "
+                "Use --shuffle_mode ligand instead. Exiting."
+            )
+            return 1
+
     ds, used_smiles_key = load_validation_set(
         args.validation_set, logger, smiles_key=args.smiles_key
     )

@@ -27,7 +27,30 @@ from tqdm import tqdm
 # Add src to path
 sys.path.append(str(Path(__file__).parent.parent / "src"))
 
-from models.modeling_novomolgen_infonce_120225_v4 import NovoMolGen, NovoMolGenConfig
+def _import_model_class(model_path: str):
+    """Auto-detect model variant from the .py file saved alongside checkpoint weights.
+
+    Reads the filename from the checkpoint directory to identify the variant, then
+    imports from src/models/ (which has the correct package context for relative
+    imports like `from .condition import ...`).
+    """
+    import importlib
+    model_dir = Path(model_path)
+    py_files = sorted(model_dir.glob("modeling_novomolgen*.py"))
+    if py_files:
+        chosen = py_files[0]  # e.g. modeling_novomolgen_infonce_120225_v4_protein_abla.py
+        module_name = chosen.stem   # strip .py
+        print(f"[auto-detect] Loading model class from: {chosen.name}")
+        try:
+            mod = importlib.import_module(f"models.{module_name}")
+            return mod.NovoMolGen, mod.NovoMolGenConfig
+        except ImportError as e:
+            print(f"[auto-detect] Warning: could not import models.{module_name}: {e}")
+            print(f"[auto-detect] Falling back to v4 default.")
+    # fallback: default v4
+    print("[auto-detect] No modeling_novomolgen*.py found in checkpoint; falling back to v4.")
+    from models.modeling_novomolgen_infonce_120225_v4 import NovoMolGen, NovoMolGenConfig
+    return NovoMolGen, NovoMolGenConfig
 from data_loader.molecule_tokenizer import MoleculeTokenizer
 from data_loader.utils import safe_to_smiles
 from transformers import AutoTokenizer
@@ -59,9 +82,10 @@ def setup_logging(log_level: str = "INFO") -> logging.Logger:
 def load_model_and_tokenizer(model_path: str, logger: logging.Logger):
     """Load model and tokenizer from full_model directory."""
     model_path = Path(model_path)
-    
     logger.info(f"Loading model from: {model_path}")
-    
+
+    NovoMolGen, NovoMolGenConfig = _import_model_class(str(model_path))
+
     # Load config
     config = NovoMolGenConfig.from_pretrained(str(model_path))
     logger.info(f"Model config: enable_cross_attn={config.enable_cross_attn}, cross_layers={config.cross_layers}")
@@ -156,7 +180,7 @@ def load_validation_sets(validation_set_paths: Union[str, List[str]], logger: lo
 
 
 def generate_molecules_for_validation_set(
-    model: NovoMolGen,
+    model,
     tokenizer,
     validation_set,
     num_samples: int,
@@ -305,25 +329,28 @@ def generate_molecules_for_validation_set(
                 needed = num_samples - len(samples_generated_for_this_val)
                 current_batch_size = min(batch_size, needed)
                 
-                # Repeat condition features for batch
-                pocket_vec_batch = pocket_vec.repeat(current_batch_size, 1)
-                evo_vec_batch = evo_vec.repeat(current_batch_size, 1)
-                ifp_batch = None if protein_only else ifp.repeat(current_batch_size, 1)
-                ligand_vec_batch = None if protein_only else ligand_vec.repeat(current_batch_size, 1)
+                # Repeat condition features for batch.
+                # protein_abla model has no protein encoder → always pass None for pocket/evo.
+                has_protein_enc = hasattr(model, "protein_encoder")
+                pocket_vec_batch    = pocket_vec.repeat(current_batch_size, 1) if has_protein_enc else None
+                evo_vec_batch       = evo_vec.repeat(current_batch_size, 1)    if has_protein_enc else None
+                ifp_batch           = None if protein_only else ifp.repeat(current_batch_size, 1)
+                ligand_vec_batch    = None if protein_only else ligand_vec.repeat(current_batch_size, 1)
 
-                # Global condition ablation (applies to all condition vectors together)
+                # Global condition ablation (skip protein vectors if protein_abla model)
                 if not protein_only and cond_ablation == "zero":
-                    # Set ALL condition vectors to zero: effectively unconditional
-                    pocket_vec_batch = torch.zeros_like(pocket_vec_batch)
-                    evo_vec_batch = torch.zeros_like(evo_vec_batch)
+                    if pocket_vec_batch is not None:
+                        pocket_vec_batch = torch.zeros_like(pocket_vec_batch)
+                    if evo_vec_batch is not None:
+                        evo_vec_batch = torch.zeros_like(evo_vec_batch)
                     ifp_batch = torch.zeros_like(ifp_batch)
                     ligand_vec_batch = torch.zeros_like(ligand_vec_batch)
                 elif not protein_only and cond_ablation == "shuffle":
-                    # Shuffle ALL condition vectors within the batch using the SAME permutation,
-                    # so their mutual alignment is preserved but broken w.r.t. current sample.
                     perm = torch.randperm(current_batch_size, device=device)
-                    pocket_vec_batch = pocket_vec_batch[perm]
-                    evo_vec_batch = evo_vec_batch[perm]
+                    if pocket_vec_batch is not None:
+                        pocket_vec_batch = pocket_vec_batch[perm]
+                    if evo_vec_batch is not None:
+                        evo_vec_batch = evo_vec_batch[perm]
                     ifp_batch = ifp_batch[perm]
                     ligand_vec_batch = ligand_vec_batch[perm]
 
@@ -451,6 +478,76 @@ def generate_molecules_for_validation_set(
     return all_generated, all_condition_info, conversion_stats
 
 
+def validate_cfg_args(args, logger: logging.Logger, model=None) -> None:
+    """檢查 CFG 相關 flag 的合法組合，避免靜默 no-op 或語意誤導。
+
+    對於會產生誤導性結果的組合直接 raise；對於可解但要小心解讀的組合 log warning。
+    """
+    # Hard error: protein_only on a protein-ablated model makes no sense.
+    if args.protein_only and model is not None and not hasattr(model, "protein_encoder"):
+        raise ValueError(
+            "--protein_only 對 protein_abla model 無效：此模型根本沒有 protein encoder，"
+            "pocket_vec/evo_vec 已被忽略。直接跑 ligand conditioning 即可（拿掉 --protein_only）。"
+        )
+
+    # Hard error: protein_only + CFG 是 silent no-op。
+    # protein-only 分支的 ligand token 已經是 null_ligand_emb；CFG 分支的
+    # uncond_tokens 也用同一個 null_ligand_emb，兩者完全相同，
+    # logits_cond - logits_uncond == 0，CFG 不提供任何訊號但仍付 2x forward。
+    if args.protein_only and args.cfg_scale > 1.0:
+        raise ValueError(
+            "protein_only=True 與 cfg_scale>1.0 衝突：cond/uncond 兩條路徑都使用 "
+            "null_ligand_emb，CFG 訊號恆為 0。請擇一：(1) 純 protein-only 生成 → "
+            "保留 --protein_only 並設 --cfg_scale 1.0；(2) 想做 CFG → 拿掉 --protein_only。"
+        )
+
+    # Hard error: sample_posterior=True + CFG。
+    # v4 已是 deterministic ligand encoder，sample_posterior=True 實際上是把 mu
+    # 換成 prior 噪音 (torch.randn)。搭配 CFG 會放大「噪音 vs null_emb」的隨機差異，
+    # 不是放大 ligand conditioning。
+    if getattr(args, "sample_posterior", False) and args.cfg_scale > 1.0:
+        raise ValueError(
+            "sample_posterior=True 與 cfg_scale>1.0 衝突：v4 下這個 flag 會用 "
+            "torch.randn 取代 mu，CFG 將放大隨機性而非 ligand 訊號。CFG 請搭配 "
+            "deterministic mu (拿掉 --sample_posterior)。"
+        )
+
+    # Soft warning: cond_ablation 搭配 CFG 會放大「退化/錯位 condition」方向。
+    if args.cond_ablation in {"zero", "shuffle"} and args.cfg_scale > 1.0:
+        logger.warning(
+            f"cond_ablation='{args.cond_ablation}' + cfg_scale={args.cfg_scale}: "
+            f"conditional 路徑使用 ablated 條件，CFG 將放大「ablated cond vs null」"
+            f"的差異而非真實 ligand 訊號。此 run 僅適合 ablation 比較，不要與正常 "
+            f"CFG runs 混合分析。"
+        )
+
+    # Soft warning: ifp_ablation 搭配 CFG 也會偏離原本的 CFG 語意。
+    if args.ifp_ablation in {"zero", "shuffle"} and args.cfg_scale > 1.0 and args.cond_ablation == "none":
+        logger.warning(
+            f"ifp_ablation='{args.ifp_ablation}' + cfg_scale={args.cfg_scale}: "
+            f"ligand encoder 收到的 IFP 已被破壞，產生的 mu 已偏離正常分布，"
+            f"CFG 放大方向會偏移。注意結果解讀。"
+        )
+
+    # Soft warning: v4 下 sample_posterior 名稱與行為不符。
+    if getattr(args, "sample_posterior", False):
+        logger.warning(
+            "sample_posterior=True 在 v4 並非從 posterior 抽樣——v4 ligand encoder "
+            "是 deterministic 的，這個 flag 實際上是用 prior 噪音 (torch.randn) 取代 "
+            "mu。如要 deterministic 行為請拿掉這個 flag。"
+        )
+
+    # Perf note: CFG path 已優化為 doubled-batch + KV cache，速度約為 cfg_scale=1.0
+    # 的 0.4 ~ 0.6x（理論下限 0.5x — batch 翻倍）。GPU 記憶體用量也約為 2x baseline，
+    # OOM 時請降低 --batch_size。
+    if args.cfg_scale > 1.0:
+        logger.info(
+            f"CFG enabled (cfg_scale={args.cfg_scale}): 已啟用 doubled-batch + KV cache 優化，"
+            f"速度約為 cfg_scale=1.0 的 0.4 ~ 0.6x，GPU 記憶體 ~2x baseline。"
+            f"OOM 時請降低 --batch_size。"
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate molecules from trained model for validation sets")
     parser.add_argument("--model_path", type=str, required=True, help="Path to full_model directory")
@@ -465,7 +562,16 @@ def main():
     parser.add_argument("--top_k", type=int, default=50, help="Top-k sampling")
     parser.add_argument("--top_p", type=float, default=0.95, help="Top-p (nucleus) sampling")
     parser.add_argument("--log_level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
-    parser.add_argument("--sample_posterior", action="store_true", help="Sample from posterior if ligand and ifp feature are not available")
+    parser.add_argument(
+        "--sample_posterior",
+        action="store_true",
+        help=(
+            "[v4 注意] 此 flag 在 v4 已不是真的從 posterior 抽樣。"
+            "v4 ligand encoder 是 deterministic 的，這個 flag 會用 prior 噪音 (torch.randn) "
+            "取代 mu。要 deterministic 行為請拿掉此 flag。"
+            "與 --cfg_scale>1.0 互斥（CFG 需 deterministic mu）。"
+        ),
+    )
     parser.add_argument("--max_retries", type=int, default=10, help="Maximum number of generation attempts per batch if conversion fails")
     parser.add_argument(
         "--ifp_ablation",
@@ -495,12 +601,24 @@ def main():
         "--cfg_scale",
         type=float,
         default=1.0,
-        help="Classifier-Free Guidance scale (v4 only). 1.0=no CFG; >1.0 amplifies conditioning. Typical: 1.5-3.0.",
+        help=(
+            "Classifier-Free Guidance scale (v4 only). 1.0=no CFG; >1.0 amplifies conditioning. "
+            "Typical: 1.5-3.0. "
+            "效能：已啟用 doubled-batch + KV cache 優化，速度約為 cfg_scale=1.0 的 0.4 ~ 0.6x，"
+            "GPU 記憶體 ~2x baseline。 "
+            "與 --protein_only 互斥（uncond/cond 同 null_emb，CFG 訊號為 0）；"
+            "與 --sample_posterior 互斥（v4 下會放大隨機性而非 ligand 訊號）。"
+        ),
     )
     parser.add_argument(
         "--protein_only",
         action="store_true",
-        help="Use only protein (pocket_vec + evo_vec) conditioning; ligand branch replaced by null_ligand_emb.",
+        help=(
+            "Use only protein (pocket_vec + evo_vec) conditioning; "
+            "ligand branch replaced by null_ligand_emb. "
+            "與 --cfg_scale>1.0 互斥：protein-only 下 cond/uncond 兩條路徑都用 null_ligand_emb，"
+            "CFG 訊號恆為 0。"
+        ),
     )
     parser.add_argument(
         "--seed",
@@ -515,9 +633,13 @@ def main():
 
     # Setup
     logger = setup_logging(args.log_level)
+
+    # Validate CFG args that don't need the model (fast checks before loading)
+    validate_cfg_args(args, logger, model=None)
+
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     logger.info("=" * 60)
     logger.info("Molecule Generation from Trained Model")
     logger.info("=" * 60)
@@ -527,12 +649,15 @@ def main():
     logger.info(f"Output directory: {output_dir}")
     logger.info(f"IFP ablation mode: {args.ifp_ablation}")
     logger.info(f"Global condition ablation mode: {args.cond_ablation}")
-    
+
     # Load model and tokenizer
     logger.info("\n" + "=" * 60)
     logger.info("Loading model and tokenizer...")
     logger.info("=" * 60)
     model, tokenizer, device = load_model_and_tokenizer(args.model_path, logger)
+
+    # Re-validate with model instance (catches protein_abla-specific errors)
+    validate_cfg_args(args, logger, model=model)
     
     # Load validation sets
     logger.info("\n" + "=" * 60)

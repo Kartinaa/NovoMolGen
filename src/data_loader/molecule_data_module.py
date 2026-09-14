@@ -243,16 +243,10 @@ class MolDataModule:
             for smiles_key in smiles_keys:
                 if smiles_key in features[0]:
                     smiles_strings = [f[smiles_key] for f in features]
-                    # Debug: print first time we find SMILES
-                    if not hasattr(_collate, '_debug_smiles_printed'):
-                        print(f"[Collate Debug] Found SMILES in key '{smiles_key}', first value: {smiles_strings[0][:50] if smiles_strings[0] else 'None'}")
-                        _collate._debug_smiles_printed = True
                     break
 
-            # Debug: if no SMILES found, print available keys
-            if smiles_strings is None and not hasattr(_collate, '_debug_no_smiles_printed'):
-                print(f"[Collate Debug] No SMILES found! Available keys in features[0]: {list(features[0].keys())}")
-                _collate._debug_no_smiles_printed = True
+            if smiles_strings is None:
+                pass  # Tanimoto loss will be skipped for this batch
 
             # Create features dict with only token-related fields for base_collator
             # Exclude condition features, smiles strings, and morgan fingerprints

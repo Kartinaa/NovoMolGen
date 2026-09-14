@@ -66,3 +66,65 @@ git+https://github.com/kjelljorner/polanyi.git
 git+https://github.com/virtualzx-nad/geodesic-interpolate.git
 git+https://github.com/insilicomedicine/fcd_torch.git
 git+https://github.com/PatWalters/rd_filters.git
+
+
+You are helping me understand and modify this codebase:
+
+My main goal is to understand the codebase well enough to pretrain or finetune the inverse folding module with my own data.
+
+Please read the repository carefully and answer the following questions with specific file paths, class/function names, and data-flow explanations. Do not only give a high-level summary. Whenever possible, point me to the exact code locations I need to modify.
+並且請結合我們之前的討論，告訴我應該如何去做修改比較合理。
+Tasks:
+
+1. Training/test data and data flow
+- Identify what training, validation, and test datasets are used in this repo.
+- Explain the expected data format: file types, fields/keys, tensor shapes, and biological meaning.
+- Trace how raw data are loaded, parsed, preprocessed, batched, and passed into the model.
+- Identify the Dataset/DataLoader/collate functions.
+- Explain what each returned item means, especially coordinates, sequence labels, masks, chain IDs, atom types, residue indices, and modality-specific fields if present.
+- Explain how train/test splits are defined or loaded.
+- Identify the entry-point scripts/configs for training and testing.
+
+2. Overall model architecture
+- Give me an overall architecture map of ODesign.
+- Break down each major module:
+  - what it is responsible for,
+  - its input,
+  - its output,
+  - where it is defined in the code,
+  - how it connects to other modules.
+- Please especially explain the inverse folding module / OInvFold module.
+- Clarify whether the inverse folding module predicts protein sequences, nucleic acid sequences, ligand atom types, or multiple modalities.
+- Explain the loss functions used during training and which output each loss supervises.
+- Give a simplified forward-pass pseudo-code showing how one batch moves through the model.
+
+3. Pretraining/finetuning the inverse folding module with my own data
+Assume I have my own structure-sequence data for inverse folding. Please tell me exactly how to add it.
+
+Please identify:
+- the minimum required fields my data must contain;
+- the recommended data format matching this repo;
+- how to write or modify the Dataset class;
+- how to modify the config files;
+- how to launch pretraining or finetuning;
+- which checkpoint-loading logic controls whether I train from scratch, resume training, or finetune;
+- which model parameters are trained/frozen by default;
+- how to freeze all modules except the inverse folding module if needed;
+- how to adapt the code if my data only contains protein backbone coordinates and amino acid sequences;
+- how to adapt the code if my data contains protein complexes or multi-chain structures.
+
+4. Practical deliverables
+Please produce:
+- a repository map focused on data/model/training files;
+- a step-by-step data-flow diagram in text;
+- a table of key functions/classes and what they do;
+- a checklist for adding my own inverse folding dataset;
+- the exact files I should edit;
+- example pseudo-code or minimal code snippets for a custom Dataset if needed;
+- example command lines for training/testing if available in the repo.
+
+Important:
+- Please distinguish clearly between what is explicitly implemented in the code and what you infer.
+- If something is missing or unclear in the repo, say so and suggest how to verify it.
+- Do not rewrite the whole codebase. Focus on understanding and actionable modification points.
+- Please answer in Chinese, but keep code/file/class/function names in English.

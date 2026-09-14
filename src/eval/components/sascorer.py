@@ -26,10 +26,10 @@ from rdkit import Chem
 from rdkit.Chem import rdMolDescriptors
 from rdkit.six import iteritems  # type: ignore
 
-# Set up the project root
-rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
+# Set up the project root (capture return so we can resolve data files below without depending on CWD)
+_PROJECT_ROOT = rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
-_fscores = pickle.load(gzip.open("./data/sa_np/fpscores.pkl.gz"))
+_fscores = pickle.load(gzip.open(str(_PROJECT_ROOT / "data/sa_np/fpscores.pkl.gz")))
 
 
 def readFragmentScores():

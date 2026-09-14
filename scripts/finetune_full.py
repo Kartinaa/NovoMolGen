@@ -62,12 +62,43 @@ def _load_model_class(config: dict):
     tanimoto_weight = config.get("tanimoto_weight", 0.0)
 
     if use_cfg:
-        # v4: CFG model — supports Tanimoto loss and CFG dropout
-        from models.modeling_novomolgen_infonce_120225_v4 import NovoMolGen as V4Model
-        from models.modeling_novomolgen_infonce_120225_v4 import NovoMolGenConfig as V4Config
-        NovoMolGen = V4Model
-        NovoMolGenConfig = V4Config
-        print(f"Using v4 CFG model (ligand_drop_prob={config['ligand_drop_prob']}, tanimoto_weight={tanimoto_weight})")
+        ablate_protein = config.get("ablate_protein", False)
+        ablate_ligand = config.get("ablate_ligand", False)
+        is_v5 = "n_protein_tokens" in config  # v5-specific field
+        if ablate_protein and ablate_ligand:
+            raise ValueError("Cannot set both ablate_protein and ablate_ligand to True.")
+        if is_v5:
+            if ablate_protein:
+                from models.modeling_novomolgen_infonce_120225_v5_proteinabla import NovoMolGen as V5AblaModel
+                from models.modeling_novomolgen_infonce_120225_v5_proteinabla import NovoMolGenConfig as V5AblaConfig
+                NovoMolGen = V5AblaModel
+                NovoMolGenConfig = V5AblaConfig
+                print(f"Using v5 protein-ablated model (ligand_drop_prob={config['ligand_drop_prob']})")
+            else:
+                from models.modeling_novomolgen_infonce_120225_v5 import NovoMolGen as V5Model
+                from models.modeling_novomolgen_infonce_120225_v5 import NovoMolGenConfig as V5Config
+                NovoMolGen = V5Model
+                NovoMolGenConfig = V5Config
+                print(f"Using v5 CFG model (ligand_drop_prob={config['ligand_drop_prob']}, tanimoto_weight={tanimoto_weight})")
+        elif ablate_protein:
+            from models.modeling_novomolgen_infonce_120225_v4_protein_abla import NovoMolGen as V4AblaModel
+            from models.modeling_novomolgen_infonce_120225_v4_protein_abla import NovoMolGenConfig as V4AblaConfig
+            NovoMolGen = V4AblaModel
+            NovoMolGenConfig = V4AblaConfig
+            print(f"Using v4 protein-ablated model (ligand-only, ligand_drop_prob={config['ligand_drop_prob']})")
+        elif ablate_ligand:
+            from models.modeling_novomolgen_infonce_120225_v4_ligand_abla import NovoMolGen as V4LigAblaModel
+            from models.modeling_novomolgen_infonce_120225_v4_ligand_abla import NovoMolGenConfig as V4LigAblaConfig
+            NovoMolGen = V4LigAblaModel
+            NovoMolGenConfig = V4LigAblaConfig
+            print(f"Using v4 ligand-ablated model (protein-only, protein_drop_prob={config['ligand_drop_prob']})")
+        else:
+            # v4: CFG model — supports Tanimoto loss and CFG dropout
+            from models.modeling_novomolgen_infonce_120225_v4 import NovoMolGen as V4Model
+            from models.modeling_novomolgen_infonce_120225_v4 import NovoMolGenConfig as V4Config
+            NovoMolGen = V4Model
+            NovoMolGenConfig = V4Config
+            print(f"Using v4 CFG model (ligand_drop_prob={config['ligand_drop_prob']}, tanimoto_weight={tanimoto_weight})")
     elif tanimoto_weight > 0:
         # Legacy: Tanimoto model without CFG
         from models.modeling_novomolgen_tanimoto import NovoMolGen as TanimotoModel
