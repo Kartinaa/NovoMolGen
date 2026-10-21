@@ -1,0 +1,401 @@
+import copy
+import hashlib
+import json
+import os
+import subprocess
+import warnings
+from pathlib import Path
+from typing import Any, Dict, Tuple, Type, Union
+
+import datasets
+import psutil
+import rootutils
+import torch
+import transformers
+from hydra import compose, initialize
+from omegaconf import DictConfig, OmegaConf
+
+rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
+
+from src.callbacks import Evaluator, WandbCallback
+from src.data_loader import MoleculeTokenizer
+from src.logging_utils import get_logger
+from src.models import NovoMolGen, NovoMolGenConfig
+from src.trainer import (
+    HFTrainingArguments,          # only for type hints
+    SFTConfig, SFTTrainer,
+    REINVENTConfig, REINVENTTrainer,
+    AugmentedHCConfig, AugmentedHCTrainer,
+)
+
+logger = get_logger(__name__)
+
+
+def unroll_configs(cfg: Dict[str, Any], parent_key='', sep='_') -> Dict[str, Any]:
+    """
+    Recursively unroll a nested dictionary of configurations and remove keys with None values.
+
+    Args:
+        cfg (Dict[str, Any]): The input dictionary containing configuration options.
+        parent_key (str): The parent key for the current level of recursion.
+        sep (str): The separator used to separate parent and child keys.
+
+    Returns:
+        Dict[str, Any]: The output unrolled dictionary.
+    """
+    items = {}
+    for key, value in cfg.items():
+        new_key = f"{parent_key}{sep}{key}" if parent_key else key
+        if isinstance(value, dict):
+            items.update(unroll_configs(value, new_key, sep=sep))
+        elif value is not None:  # Exclude keys with None values
+            items[new_key] = value
+    return items
+
+
+def creat_unique_experiment_name(config: DictConfig,
+                                 ) -> str:
+    """
+    Generate a unique experiment name based on the provided configurations.
+
+    Args:
+        config (Dict[str, Any]): The input dictionary containing experiment configurations.
+
+    Returns:
+        str: A unique experiment name.
+    """
+    _config = OmegaConf.to_container(copy.deepcopy(config))
+    if 'eval' in _config.keys():
+        _config.pop('eval', None)
+    model_arch = _config['model']['model_type']
+    data_name = Path(_config['dataset']['dataset_name']).name
+    if 'tokenizer_name' in _config['dataset'].keys():
+        _tok_name = Path(_config['dataset']['tokenizer_name']).name
+    else:
+        _tok_name = Path(_config['dataset']['tokenizer_path']).name
+    _tok_name = _tok_name.replace(f"_{data_name}", "").replace(".json", "").replace("tokenizer_wordlevel_", "").replace(
+        "_30000_0_0", "").replace(" ", "_")
+    if 'label_smoothing_factor' in _config['trainer'].keys():
+        post_fix = '_smooth'
+    else:
+        post_fix = ''
+    _config = unroll_configs(_config)
+    # Convert the unrolled dictionary to a JSON string and hash it
+    unrolled_json = json.dumps(_config, sort_keys=True)
+    hash_name = hashlib.md5(unrolled_json.encode()).hexdigest()[:8]
+    exp_name = f"{model_arch}_{data_name}_{_tok_name}_{hash_name}"
+    exp_name += post_fix
+    return exp_name
+
+
+def creat_unique_experiment_name_for_finetune(
+        config: DictConfig,
+        include_finetune_hash_name: bool = True,
+):
+    """
+    Generate a unique experiment name based on the provided configurations.
+
+    Args:
+        config (Dict[str, Any]): The input dictionary containing experiment configurations.
+        include_finetune_hash_name (bool): whether to include finetune spec name or not 
+
+    Returns:
+        exp_name, base_exp_name, base_output_dir
+    """
+    _config = OmegaConf.to_container(copy.deepcopy(config))
+
+    finetune_config = _config['finetune']
+    finetune_target = _config['finetune']['task_name']
+    finetune_target = finetune_target.replace(" ", "_")
+    finetune_checkpoint = _config['finetune']['checkpoint']
+    mol_type = _config['dataset']['mol_type']
+    mol_type = mol_type.replace(" ", "_")
+
+    if 'eval' in _config.keys():
+        _config.pop('eval', None)
+    if 'finetune' in _config.keys():
+        _config.pop('finetune', None)
+
+    model_arch = _config['model']['model_type']
+    data_name = Path(_config['dataset']['dataset_name']).name
+    if 'tokenizer_name' in _config['dataset'].keys():
+        _tok_name = Path(_config['dataset']['tokenizer_name']).name
+    else:
+        _tok_name = Path(_config['dataset']['tokenizer_path']).name
+    _tok_name = _tok_name.replace(f"_{data_name}", "").replace(".json", "").replace("tokenizer_wordlevel_", "").replace(
+        "_30000_0_0", "").replace(" ", "_")
+    _config = unroll_configs(_config)
+    # Convert the unrolled dictionary to a JSON string and hash it
+    unrolled_json = json.dumps(_config, sort_keys=True)
+    hash_name = hashlib.md5(unrolled_json.encode()).hexdigest()[:8]
+    base_exp_name = f"{model_arch}_{data_name}_{_tok_name}_{hash_name}"
+    base_output_dir = os.path.join(_config['save_path'], base_exp_name)
+
+    finetune_config = unroll_configs(finetune_config)
+    finetune_unrolled_json = json.dumps(finetune_config, sort_keys=True)
+    finetune_hash_name = hashlib.md5(finetune_unrolled_json.encode()).hexdigest()[:8]
+
+    if include_finetune_hash_name:
+        if isinstance(finetune_checkpoint, str):
+            finetune_checkpoint = Path(finetune_checkpoint).name
+            if hash_name in finetune_checkpoint:
+                exp_name = f"{finetune_checkpoint}-{finetune_hash_name}"
+            else:
+                exp_name = f"{mol_type}-{hash_name}-{finetune_target}-{finetune_hash_name}"
+        else:
+            exp_name = f"{mol_type}-{hash_name}-{finetune_target}-{finetune_hash_name}"
+    else:
+        if isinstance(finetune_checkpoint, str):
+            finetune_checkpoint = Path(finetune_checkpoint).name
+            if hash_name in finetune_checkpoint:
+                exp_name = f"{finetune_checkpoint}"
+            else:
+                exp_name = f"{mol_type}-{hash_name}-{finetune_target}-{finetune_checkpoint}"
+        else:
+            exp_name = f"{mol_type}-{hash_name}-{finetune_target}-{finetune_checkpoint}"
+
+    return exp_name, base_exp_name, base_output_dir
+
+
+# code from: https://github.com/huggingface/transformers/blob/bd50402b56980ff17e957342ef69bd9b0dd45a7b/src/transformers/trainer.py#L2758
+def is_world_process_zero(train_args) -> bool:
+    """
+    Whether this process is the global main process (when training in a distributed fashion on several
+    machines, this is only going to be `True` for one process).
+    """
+    # Special case for SageMaker ModelParallel since there process_index is dp_process_index, not the global
+    # process index.
+    from transformers.utils.import_utils import is_sagemaker_mp_enabled
+    if is_sagemaker_mp_enabled():
+        import smdistributed.modelparallel.torch as smp
+        return smp.rank() == 0
+    else:
+        return train_args.process_index == 0
+
+
+def get_real_cpu_cores() -> int:
+    """Return the number of CPU *cores* (not HT threads)."""
+    try:
+        return int(subprocess.run(["nproc"], stdout=subprocess.PIPE, text=True).stdout.strip())
+    except Exception as e:  # pragma: no cover
+        logger.warning("Falling back to psutil.cpu_count(): %s", e)
+        return psutil.cpu_count(logical=False)
+
+def init_model(
+    model_cfg: DictConfig,
+    *,
+    max_seq_length: int,
+    vocab_size: int,
+    eos_token_id: int,
+    bos_token_id: int,
+    mol_type: str,
+) -> NovoMolGen:
+    """Factory for `NovoMolGen` models."""
+    cfg_dict  = OmegaConf.to_container(model_cfg)
+    model_typ = cfg_dict.get("model_type", "llama").lower()
+
+    if model_typ == "llama":
+        conf = NovoMolGenConfig(
+            **cfg_dict,
+            max_seq_length=max_seq_length,
+            vocab_size=vocab_size,
+            eos_token_id=eos_token_id,
+            bos_token_id=bos_token_id,
+        )
+        return NovoMolGen(conf, mol_type=mol_type)
+
+    raise ValueError(f"Unsupported model_type={model_typ!r}")
+
+def _checkpoint_exists(output_dir: str) -> bool:
+    """Detect an HF checkpoint directory."""
+    return any(Path(output_dir, p).is_dir() and p.startswith("checkpoint")
+               for p in os.listdir(output_dir))
+
+def _load_cfg(
+    config_name: str,
+    config_dir: str,
+    **overrides: Any,
+) -> DictConfig:
+    """Hydra config loader that supports CLI key=value overrides."""
+    with initialize(version_base=None, config_path=config_dir):
+        ov = [f"{k}={v}" for k, v in overrides.items()]
+        return compose(config_name=config_name, overrides=ov)
+
+
+def _build_callbacks(
+    cfg: DictConfig,
+    model,
+    exp_name: str,
+) -> list:
+    """Assemble callbacks (evaluator, WandB, …) once."""
+    cbs = []
+
+    if "eval" in cfg:
+        if cfg.eval.n_jobs > get_real_cpu_cores():
+            warnings.warn("Reducing eval n_jobs to available CPU cores")
+        cbs.append(Evaluator(**cfg.eval))
+
+    if cfg.get("wandb_logs", False):
+        import wandb  # local import to avoid dependency when disabled
+
+        cbs.append(
+            WandbCallback(
+                model=model,
+                entity=os.getenv("WANDB_ENTITY"),
+                project=os.getenv("WANDB_PROJECT"),
+                name=exp_name,
+                config=OmegaConf.to_container(cfg),
+                tags=os.getenv("WANDB_TAGS", "").split(","),
+                resume=True,
+                mode=os.getenv("WANDB_MODE", "online"),
+            )
+        )
+    return cbs
+
+
+_FINETUNE_REGISTRY: Dict[
+    str, Tuple[Type[SFTConfig], Type[SFTTrainer]]
+] = {
+    "SFT": (SFTConfig, SFTTrainer),
+    "REINVENT": (REINVENTConfig, REINVENTTrainer),
+    "AugmentedHC": (AugmentedHCConfig, AugmentedHCTrainer),
+}
+
+### What we could also use:
+def _prepare_base_model(config: DictConfig) -> Tuple[NovoMolGen, Any]:
+    """Load checkpoint or fresh model + tokenizer."""
+    tokenizer = MoleculeTokenizer.load(
+        config.dataset.tokenizer_path
+    ).get_pretrained()
+
+    if isinstance(config.finetune.checkpoint, str):
+        model = NovoMolGen.from_pretrained(config.finetune.checkpoint)
+        logger.info("Loaded model from %s", config.finetune.checkpoint)
+    elif config.finetune.checkpoint == 0:
+        model = init_model(
+            config.model,
+            max_seq_length=config.dataset.max_seq_length,
+            vocab_size=tokenizer.vocab_size,
+            eos_token_id=tokenizer.eos_token_id,
+            bos_token_id=tokenizer.bos_token_id,
+            mol_type=config.dataset.mol_type,
+        )
+        logger.info("Initialized new model from scratch")
+    else:
+        base_name = creat_unique_experiment_name(config)
+        ckpt = f"tmp-spec-checkpoint-{config.finetune.checkpoint}"
+        model = NovoMolGen.from_pretrained(f"MolGen/{base_name}", checkpoint_path=ckpt)
+        logger.info("Loaded model from MolGen/%s @ %s", base_name, ckpt)
+
+    # Keep mol_type in sync with dataset
+    if model.mol_type != config.dataset.mol_type:
+        logger.info("Overriding model.mol_type ➜ %s", config.dataset.mol_type)
+        model.mol_type = config.dataset.mol_type
+
+    return model, tokenizer
+
+
+def set_seed(seed: int) -> None:
+    """Set seed for all relevant libraries."""
+    import random
+    import numpy as np
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    os.environ["NVIDIA_TF32_OVERRIDE"] = "0"
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    transformers.set_seed(seed)
+    datasets.config.INFINITE_DATASET_SEED = seed
+
+
+
+def plot_reward_with_molecules(trainer, steps_to_show=(100,300,500,700,900)):
+
+    from rdkit import Chem
+    from rdkit.Chem import Draw
+    import numpy as np, pandas as pd, matplotlib.pyplot as plt
+    from matplotlib.offsetbox import OffsetImage, AnnotationBbox
+
+    df = pd.DataFrame(trainer.trainer_state.log_history)
+    xcol = "train/num_oracle_calls" if "train/num_oracle_calls" in df else "train/global_step"
+    keep = [xcol, "train/top_1_reward", "train/top_10_reward", "train/average_reward"]
+    keep = [c for c in keep if c in df]
+    df = df[keep].dropna(how="all").sort_values(xcol).groupby(xcol, as_index=False).last()
+
+    win = max(1, len(df)//50)
+    for c in ["train/top_1_reward", "train/top_10_reward", "train/average_reward"]:
+        if c in df:
+            df[c+"_smooth"] = df[c].rolling(win, min_periods=1).mean()
+    ycurve = "train/top_1_reward_smooth" if "train/top_1_reward_smooth" in df else ( "train/top_1_reward" if "train/top_1_reward" in df else df.columns[1] )
+
+    fig, ax = plt.subplots(figsize=(16,7))
+    for c, label in [
+        ("train/top_1_reward_smooth", "Top-1 reward"),
+        ("train/top_10_reward_smooth", "Top-10 reward"),
+    ]:
+        if c in df:
+            ax.plot(df[xcol], df[c], label=label)
+
+    # Customize borders
+    ax.spines["top"].set_visible(False)  # Hide the top border
+    ax.spines["right"].set_visible(False)  # Hide the right border
+    ax.spines["left"].set_visible(False)  # Hide the left border
+    ax.spines["bottom"].set_linewidth(2)  # Thicken the bottom border
+    ax.set_ylabel("Reward", fontsize=12)
+    ax.set_xlabel("Number of oracle calls")
+
+    # Add horizontal grid behind the lines
+    ax.yaxis.grid(True, which="major", linestyle=":")
+    ax.set_axisbelow(True)
+    ax.legend(loc='right', ncol=1, frameon=False, fontsize=12)
+
+    # --- pick molecules by oracle-call index (dict preserves insertion order in Py3.7+)
+    mol_seq = list(trainer.generated_molecules_to_reward.items())
+    n = len(mol_seq)
+    chosen = [s for s in steps_to_show if 1 <= s <= n]
+    if not chosen:
+        # fallback to 20/40/60/80/100% of seen calls
+        chosen = [max(1, int(n*t)) for t in (0.2,0.4,0.6,0.8,1.0)]
+
+    # --- helper: render SMILES → PIL image
+    def smiles_img(smiles, size=(480,320)):
+        m = Chem.MolFromSmiles(smiles)
+        if m is None: return None
+        return Draw.MolToImage(m, size=size)
+
+    # --- overlay thumbnails
+    xvals = df[xcol].astype(float).values
+    yvals = df[ycurve].astype(float).values
+    yr = ax.get_ylim(); yspan = yr[1]-yr[0]
+
+    for step in chosen:
+        top_idx = torch.tensor(list((trainer.generated_molecules_to_reward.values())))[:step].argmax()
+        smiles, rew = mol_seq[top_idx]
+        img = smiles_img(smiles)
+        if img is None: continue
+        # interpolate y on the curve at this x (step ~ oracle calls index)
+        x = float(step)
+        # if xcol != num_oracle_calls, map by proportion
+        if not xcol.endswith("num_oracle_calls"):
+            x = xvals[-1] * (step / max(1, n-1))
+        y = float(np.interp(x, xvals, yvals))
+        ab = AnnotationBbox(
+            OffsetImage(img, zoom=0.23),
+            (x, y),
+            xybox=(0, 75), boxcoords="offset points", frameon=True,
+            bboxprops=dict(edgecolor="0.7", linewidth=0.8),
+            arrowprops=dict(arrowstyle="->", lw=0.8, color="0.5"),
+        )
+        ax.add_artist(ab)
+        ax.text(
+            x, y + 0.02*yspan, f"{float(getattr(rew,'item',lambda:rew)()):.3f}",
+            ha="center", va="bottom", fontsize=9,
+            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="0.7", alpha=0.9)
+        )
+
+    plt.tight_layout()
+    plt.show()
