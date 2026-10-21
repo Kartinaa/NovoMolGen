@@ -163,7 +163,9 @@ dmypy.json
 *.tar.gz
 *.safetensors
 *.bin
-models/
+# Anchored: a bare "models/" also matches src/models/, which silently
+# excluded all model source code (v4/v5 were never committed).
+/models/
 
 # Lightning-Hydra-Template
 configs/local/default.yaml
