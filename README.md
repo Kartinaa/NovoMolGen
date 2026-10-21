@@ -8,11 +8,10 @@ cross-attention conditioning on structural features of a target. Given a pocket 
 active, it generates new molecules for that pocket — de novo, or seeded with a SAFE prefix for
 lead-optimization subtasks (scaffold hopping, fragment growing, linker design).
 
-> **Scope of this branch.** This is the curated **v5** release: it contains only the model,
-> scripts and config needed to train and run the v5 CFG/Tanimoto model. Earlier variants
-> (v1–v4, the VAE/KL and InfoNCE models, ablations, CrossDocked/xdock runs) and the upstream
-> reinforcement-learning stack are deliberately omitted so there is exactly one obvious path
-> through the repo. They remain in the development branch.
+> **Branches.** This is the development branch, which keeps every model variant (v1–v5,
+> ablations, CrossDocked/xdock experiments) and the upstream reinforcement-learning stack.
+> The **`release-v5`** branch is a curated subset containing only what is needed to train
+> and run the v5 CFG/Tanimoto model — point collaborators there.
 
 ## How conditioning works (one paragraph)
 
