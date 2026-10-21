@@ -1,6 +1,6 @@
 # Structure-SAFE
 
-Conditional small-molecule generation steered by a **protein pocket** and a **reference ligand**.
+Conditional small-molecule generation steered by a **protein pocket** and optionally a **reference ligand**.
 
 Structure-SAFE extends [NovoMolGen](https://github.com/chandar-lab/NovoMolGen) (a GPT-style
 molecular language model generating [SAFE](https://github.com/datamol-io/safe) strings) with
@@ -71,22 +71,37 @@ pip install oddt rdkit numpy
 
 ---
 
-## 2. Download the checkpoint
+## 2. Download the checkpoints
 
-> **Weights:** <!-- TODO: paste the Google Drive share link here -->
-> `structure-safe-v5-checkpoint-33110.tar.gz` (753 MB)
+Both are on [Google Drive](https://drive.google.com/drive/folders/1fQCoXZx7EAqkPMqC_NevEaLD14R_iN5Q?usp=drive_link).
+Which one you need depends on what you are doing:
+
+| File | What it is | Needed for |
+|---|---|---|
+| `full_model.zip` | Fine-tuned model for protein- (optionally ligand-) conditioned generation | Generating molecules — §3 |
+| `checkpoint-309520.zip` | NovoMolGen backbone, pretrained on 1.5B SAFE strings from ZINC22 | Training your own model — §4 |
+
+**To generate**, unzip the fine-tuned model anywhere you like:
 
 ```bash
 mkdir -p outputs/models/structure_safe_v5
-tar -xzf structure-safe-v5-checkpoint-33110.tar.gz -C outputs/models/structure_safe_v5
+unzip full_model.zip -d outputs/models/structure_safe_v5
 # → outputs/models/structure_safe_v5/full_model/
 ```
 
-Use that `full_model/` directory wherever a model path is required below.
+Pass that `full_model/` directory wherever a model path is required.
 
-Load the checkpoint **through this repo**, not through `AutoModelForCausalLM`: its `config.json`
-carries a stale `auto_map`, so `from_pretrained(..., trust_remote_code=True)` will fail.
-`scripts/generate_from_encoded_v5.py` imports the model class directly and handles this.
+**To train**, unzip the backbone to the location the config already points at:
+
+```bash
+mkdir -p models/novomolgen_300M_YB
+unzip checkpoint-309520.zip -d models/novomolgen_300M_YB
+# → models/novomolgen_300M_YB/checkpoint-309520/  (= pretrained_path in the v5 config)
+```
+
+> Load either checkpoint **through this repo**, not with `AutoModelForCausalLM`. Their
+> `config.json` carries a stale `auto_map`, so `from_pretrained(..., trust_remote_code=True)`
+> fails; `scripts/generate_from_encoded_v5.py` imports the model class directly and handles it.
 
 ---
 
@@ -192,7 +207,7 @@ Settings worth knowing in
 
 | Key | Value | Meaning |
 |---|---|---|
-| `pretrained_path` | `models/novomolgen_300M_YB/checkpoint-309520` | Pretrained NovoMolGen backbone, 32 layers ([upstream weights](https://huggingface.co/collections/chandar-lab/novomolgen-681bce8b0e73b5dc7a3b0ff1)) |
+| `pretrained_path` | `your_path/checkpoint-309520` | Pretrained NovoMolGen backbone, 32 layers |
 | `cross_layers` | `[0 … 31]` | Cross-attention on every block |
 | `n_protein_tokens` / `n_ligand_tokens` | `4` / `4` | Condition tokens per modality |
 | `cond_tokens_len` | `256` | Condition width |
@@ -207,18 +222,3 @@ Total loss is `NLL + tanimoto_weight × Tanimoto`. Training reports to W&B; set
 
 ---
 
-## Citation
-
-Structure-SAFE builds on NovoMolGen:
-
-```bibtex
-@misc{chitsaz2025novomolgenrethinkingmolecularlanguage,
-      title={NovoMolGen: Rethinking Molecular Language Model Pretraining},
-      author={Kamran Chitsaz and Roshan Balaji and Quentin Fournier and Nirav Pravinbhai Bhatt and Sarath Chandar},
-      year={2025},
-      eprint={2508.13408},
-      archivePrefix={arXiv},
-      primaryClass={cs.LG},
-      url={https://arxiv.org/abs/2508.13408},
-}
-```
